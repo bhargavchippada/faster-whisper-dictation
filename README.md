@@ -90,6 +90,9 @@ pip install sounddevice
 
 # Transcribe a single utterance then exit
 ./scripts/dictate-stream.py --once
+
+# Print to stdout only (no typing) — used by dictate-hold-hotkey.sh
+./scripts/dictate-stream.py --no-type
 ```
 
 ## Configuration
@@ -177,6 +180,8 @@ docker compose down       # stop
 - **"Too short" or "Audio too quiet"** — The silence filter rejected the recording. Adjust thresholds: `DICTATION_MIN_DURATION=0.3` or `DICTATION_MIN_ENERGY=200`.
 - **Text appears in wrong window** — Text is pasted into the currently focused window. Make sure focus is correct before transcription finishes.
 - **ydotool not working** — Ensure the daemon is running (`sudo systemctl start ydotool`) and your user is in the `input` group.
+- **Hold-hotkey terminal opens and closes immediately** — Usually `sounddevice` not installed for the python3 in your PATH. Run `python3 -c "import sounddevice"` to check. Install with `pip install sounddevice`. If using a keyboard shortcut, the PATH may differ from your terminal — see `common.sh` PATH augmentation.
+- **Hold-hotkey does nothing (no terminal)** — A stale lock from a previous run. Check with `fuser /tmp/dictation-$(id -u)/hold-hotkey.lock` and kill the listed process, or `rm /tmp/dictation-$(id -u)/hold-hotkey.lock`.
 
 ## Contributing
 

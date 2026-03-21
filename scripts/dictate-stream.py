@@ -133,8 +133,6 @@ def stream_dictation(once=False, no_type=False):
 
     if not no_type:
         notify("🎤 Streaming...", "Speak now (Ctrl+C to stop)")
-
-    if not no_type:
         print("Listening... (Ctrl+C to stop)", file=sys.stderr)
 
     speech_frames = []

@@ -62,6 +62,8 @@ else
   notify "🎤 Recording..." "Press shortcut again to stop"
 
   # Record in background: 16kHz mono (optimal for Whisper)
-  start_recording "$AUDIO_FILE"
+  # Close flock fd for child so pw-record doesn't inherit the lock
+  pw-record --rate 16000 --channels 1 --format s16 "$AUDIO_FILE" 9>&- &
+  REC_PID=$!
   echo "$REC_PID" > "$PIDFILE"
 fi

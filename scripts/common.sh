@@ -55,8 +55,8 @@ check_audio() {
 
   # Single Python call: analyze WAV and check thresholds
   # Exit codes: 0=OK, 1=too short, 2=too quiet, 3=error
-  local result
-  result=$(python3 -c "
+  local result rc
+  if result=$(python3 -c "
 import wave, struct, math, sys
 audio_file, min_dur, min_nrg = sys.argv[1], float(sys.argv[2]), float(sys.argv[3])
 with wave.open(audio_file, 'rb') as w:
@@ -71,8 +71,11 @@ with wave.open(audio_file, 'rb') as w:
     if rms < min_nrg:
         print(f'{rms:.0f}')
         sys.exit(2)
-" "$audio_file" "$min_duration" "$min_energy" 2>/dev/null)
-  local rc=$?
+" "$audio_file" "$min_duration" "$min_energy" 2>/dev/null); then
+    rc=0
+  else
+    rc=$?
+  fi
 
   case $rc in
     0) return 0 ;;
