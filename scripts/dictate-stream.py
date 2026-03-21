@@ -1,26 +1,30 @@
 #!/usr/bin/env python3
-"""Streaming dictation via the Speaches WebSocket Realtime API.
+"""Streaming dictation using local VAD and the REST transcription API.
 
-Records from the default microphone and streams audio to the server.
-The server uses VAD to detect speech boundaries and returns transcriptions
-for each utterance. Results are typed into the focused window in real-time.
+Records from the default microphone, detects speech boundaries locally using
+energy-based voice activity detection, and sends each utterance to the server's
+REST API for transcription. Results are typed into the focused window in real-time.
 
 Usage:
     ./dictate-stream.py              # stream until Ctrl+C
     ./dictate-stream.py --once       # transcribe one utterance then exit
+    ./dictate-stream.py --no-type    # print to stdout only (for use by other scripts)
 
-Dependencies: pip install sounddevice websockets
-Server: ws://localhost:10300/v1/realtime (Speaches)
+Dependencies: pip install sounddevice
+Server: http://localhost:10300 (Speaches / faster-whisper-server)
 """
 
 import argparse
-import asyncio
-import base64
+import io
 import json
+import math
 import os
+import struct
 import subprocess
 import sys
+import threading
 import time
+import wave
 
 try:
     import sounddevice as sd
@@ -28,22 +32,22 @@ except ImportError:
     print("Error: sounddevice not installed. Run: pip install sounddevice", file=sys.stderr)
     sys.exit(1)
 
-try:
-    import websockets
-except ImportError:
-    print("Error: websockets not installed. Run: pip install websockets", file=sys.stderr)
-    sys.exit(1)
-
-SAMPLE_RATE = 24000  # Server expects 24kHz for realtime API
+SAMPLE_RATE = 16000  # 16kHz mono — optimal for Whisper
 CHANNELS = 1
 DTYPE = "int16"
-CHUNK_SIZE = 2400  # 100ms of audio at 24kHz
+BLOCK_MS = 30  # VAD frame size in ms
+BLOCK_SIZE = SAMPLE_RATE * BLOCK_MS // 1000  # samples per block
 
 BASE_URL = os.environ.get("WHISPER_BASE_URL", "http://localhost:10300")
-WS_URL = BASE_URL.replace("http://", "ws://").replace("https://", "wss://") + "/v1/realtime"
+TRANSCRIBE_URL = f"{BASE_URL}/v1/audio/transcriptions"
 MODEL = os.environ.get("WHISPER_MODEL", "Systran/faster-whisper-large-v3")
 LANG = os.environ.get("WHISPER_LANG", "en")
 PASTE_DELAY = float(os.environ.get("DICTATION_PASTE_DELAY", "0.3"))
+
+# VAD thresholds (configurable via env)
+VAD_ENERGY_THRESHOLD = float(os.environ.get("DICTATION_VAD_ENERGY", "500"))
+VAD_SILENCE_MS = int(os.environ.get("DICTATION_VAD_SILENCE_MS", "800"))
+VAD_MIN_SPEECH_MS = int(os.environ.get("DICTATION_VAD_MIN_SPEECH_MS", "300"))
 
 
 def detect_display():
@@ -55,7 +59,6 @@ def type_text(text):
     """Type text into the focused window via clipboard."""
     display = detect_display()
     if display == "wayland":
-        # Save clipboard, set new content, paste, restore
         prev = subprocess.run(["wl-paste"], capture_output=True, text=True, check=False).stdout
         subprocess.run(["wl-copy", text], check=False)
         subprocess.run(["ydotool", "key", "29:1", "47:1", "47:0", "29:0"], check=False)
@@ -76,141 +79,152 @@ def notify(title, body=""):
                    capture_output=True, check=False)
 
 
-async def stream_dictation(once=False):
-    """Connect to the realtime API and stream microphone audio."""
-    ws_url = f"{WS_URL}?model={MODEL}&intent=transcription&language={LANG}"
+def audio_to_wav(frames, sample_rate=SAMPLE_RATE):
+    """Convert raw int16 audio frames to an in-memory WAV file."""
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(CHANNELS)
+        w.setsampwidth(2)  # 16-bit
+        w.setframerate(sample_rate)
+        w.writeframes(b"".join(frames))
+    return buf.getvalue()
 
-    notify("🎤 Streaming...", "Speak now (Ctrl+C to stop)")
+
+def transcribe_audio(wav_data):
+    """Send WAV audio to the REST API and return the transcribed text."""
+    try:
+        result = subprocess.run(
+            ["curl", "-s", "--max-time", "30",
+             TRANSCRIBE_URL,
+             "-F", f"file=@-;filename=audio.wav",
+             "-F", f"model={MODEL}",
+             "-F", f"language={LANG}"],
+            input=wav_data,
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            return ""
+        resp = json.loads(result.stdout)
+        return resp.get("text", "").strip()
+    except Exception:
+        return ""
+
+
+def rms_energy(data):
+    """Calculate RMS energy of int16 audio data."""
+    n_samples = len(data) // 2
+    if n_samples == 0:
+        return 0.0
+    samples = struct.unpack(f"<{n_samples}h", data)
+    return math.sqrt(sum(s * s for s in samples) / n_samples)
+
+
+def stream_dictation(once=False, no_type=False):
+    """Main streaming loop: record → VAD → transcribe → type."""
+    # Verify server is reachable
+    health = subprocess.run(
+        ["curl", "-sf", "--max-time", "3", f"{BASE_URL}/health"],
+        capture_output=True, check=False)
+    if health.returncode != 0:
+        notify("❌ Error", "Whisper server is not running")
+        print(f"Error: whisper server not reachable at {BASE_URL}", file=sys.stderr)
+        sys.exit(1)
+
+    if not no_type:
+        notify("🎤 Streaming...", "Speak now (Ctrl+C to stop)")
+
+    if not no_type:
+        print("Listening... (Ctrl+C to stop)", file=sys.stderr)
+
+    speech_frames = []
+    is_speaking = False
+    silence_blocks = 0
+    speech_blocks = 0
+    silence_threshold = VAD_SILENCE_MS // BLOCK_MS  # blocks of silence to end utterance
+    min_speech_blocks = VAD_MIN_SPEECH_MS // BLOCK_MS  # minimum speech to accept
+
+    stop = threading.Event()
+
+    def audio_callback(indata, frames, time_info, status):
+        nonlocal is_speaking, silence_blocks, speech_blocks
+
+        if status:
+            print(f"Audio: {status}", file=sys.stderr)
+
+        data = bytes(indata)
+        energy = rms_energy(data)
+
+        if energy >= VAD_ENERGY_THRESHOLD:
+            # Speech detected
+            if not is_speaking:
+                is_speaking = True
+                silence_blocks = 0
+                speech_blocks = 0
+            speech_blocks += 1
+            silence_blocks = 0
+            speech_frames.append(data)
+        elif is_speaking:
+            # Silence after speech
+            silence_blocks += 1
+            speech_frames.append(data)  # include trailing silence for context
+
+            if silence_blocks >= silence_threshold:
+                # End of utterance — transcribe in background
+                if speech_blocks >= min_speech_blocks:
+                    frames_copy = list(speech_frames)
+                    threading.Thread(
+                        target=process_utterance,
+                        args=(frames_copy, once, no_type),
+                        daemon=True,
+                    ).start()
+                speech_frames.clear()
+                is_speaking = False
+                silence_blocks = 0
+                speech_blocks = 0
+
+    def process_utterance(frames, once_mode, no_type_mode):
+        """Transcribe an utterance and type/print the result."""
+        wav_data = audio_to_wav(frames)
+        text = transcribe_audio(wav_data)
+        if text:
+            print(text, flush=True)
+            if not no_type_mode:
+                type_text(text + " ")
+        if once_mode:
+            stop.set()
 
     try:
-        async with websockets.connect(ws_url, open_timeout=10) as ws:
-            # Configure session for transcription-only mode
-            await ws.send(json.dumps({
-                "type": "session.update",
-                "session": {
-                    "input_audio_transcription": {"model": MODEL},
-                    "turn_detection": {
-                        "type": "server_vad",
-                        "threshold": 0.5,
-                        "silence_duration_ms": 1000,
-                        "create_response": False,
-                    }
-                }
-            }))
-
-            # Consume handshake events (session.created, session.updated)
-            for _ in range(3):
-                msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
-                if msg.get("type") in ("session.created", "session.updated"):
-                    continue
-                elif msg.get("type") == "error":
-                    print(f"Server error during setup: {msg}", file=sys.stderr)
-                    sys.exit(1)
-                else:
-                    break
-
-            stop_event = asyncio.Event()
-
-            async def receive_events():
-                """Listen for transcription results."""
-                loop = asyncio.get_running_loop()
-                try:
-                    async for raw in ws:
-                        event = json.loads(raw)
-                        etype = event.get("type", "")
-                        if etype == "conversation.item.input_audio_transcription.completed":
-                            transcript = event.get("transcript", "").strip()
-                            if transcript:
-                                print(transcript)
-                                await loop.run_in_executor(None, type_text, transcript + " ")
-                                if once:
-                                    stop_event.set()
-                                    return
-                        elif etype == "error":
-                            print(f"Server error: {event}", file=sys.stderr)
-                except websockets.exceptions.ConnectionClosed:
-                    pass
-                finally:
-                    stop_event.set()
-
-            async def send_audio():
-                """Stream microphone audio to the server."""
-                loop = asyncio.get_running_loop()
-                queue = asyncio.Queue()
-
-                def audio_callback(indata, frames, time_info, status):
-                    if status:
-                        print(f"Audio: {status}", file=sys.stderr)
-                    loop.call_soon_threadsafe(queue.put_nowait, bytes(indata))
-
-                stream = sd.RawInputStream(
-                    samplerate=SAMPLE_RATE, channels=CHANNELS,
-                    dtype=DTYPE, blocksize=CHUNK_SIZE,
-                    callback=audio_callback,
-                )
-                with stream:
-                    while not stop_event.is_set():
-                        try:
-                            data = await asyncio.wait_for(queue.get(), timeout=0.5)
-                            encoded = base64.b64encode(data).decode()
-                            await ws.send(json.dumps({
-                                "type": "input_audio_buffer.append",
-                                "audio": encoded,
-                            }))
-                        except asyncio.TimeoutError:
-                            continue
-                        except websockets.exceptions.ConnectionClosed:
-                            break
-
-            recv_task = asyncio.create_task(receive_events())
-            send_task = asyncio.create_task(send_audio())
-
-            try:
-                if once:
-                    await stop_event.wait()
-                else:
-                    await asyncio.gather(recv_task, send_task)
-            finally:
-                for task in (recv_task, send_task):
-                    if not task.done():
-                        task.cancel()
-                        try:
-                            await task
-                        except asyncio.CancelledError:
-                            pass
-
-    except ConnectionRefusedError:
-        notify("❌ Error", "Whisper server is not running")
-        print(f"Error: cannot connect to {ws_url}", file=sys.stderr)
-        sys.exit(1)
-    except websockets.exceptions.InvalidStatus as e:
-        notify("❌ Error", f"Server returned HTTP {e.response.status_code}")
-        if e.response.status_code in (403, 404):
-            print(f"Error: {ws_url} returned {e.response.status_code}. "
-                  "Streaming requires the speaches image (ghcr.io/speaches-ai/speaches). "
-                  "See README for setup.", file=sys.stderr)
-        else:
-            print(f"Error: WebSocket connection rejected: {e}", file=sys.stderr)
-        sys.exit(1)
-    except (asyncio.TimeoutError, websockets.exceptions.WebSocketException, OSError) as e:
-        notify("❌ Error", "Connection lost")
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
+        with sd.RawInputStream(
+            samplerate=SAMPLE_RATE,
+            channels=CHANNELS,
+            dtype=DTYPE,
+            blocksize=BLOCK_SIZE,
+            callback=audio_callback,
+        ):
+            if once:
+                stop.wait()
+            else:
+                while not stop.is_set():
+                    stop.wait(timeout=0.5)
     except Exception as e:
         notify("❌ Error", str(e)[:80])
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
     finally:
-        notify("🎤 Stopped", "Streaming dictation ended")
+        if not no_type:
+            notify("🎤 Stopped", "Streaming dictation ended")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Streaming dictation via faster-whisper-server")
+    parser = argparse.ArgumentParser(description="Streaming dictation via local VAD + REST API")
     parser.add_argument("--once", action="store_true", help="Transcribe one utterance then exit")
+    parser.add_argument("--no-type", action="store_true",
+                        help="Print transcripts to stdout without typing into focused window")
     args = parser.parse_args()
 
     try:
-        asyncio.run(stream_dictation(once=args.once))
+        stream_dictation(once=args.once, no_type=args.no_type)
     except KeyboardInterrupt:
         pass
 

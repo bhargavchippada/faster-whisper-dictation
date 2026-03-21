@@ -29,11 +29,9 @@ cd faster-whisper-dictation
 sudo apt install -y pipewire curl xdotool xclip libnotify-bin python3
 # Wayland (instead of xdotool/xclip)
 # sudo apt install -y wl-clipboard ydotool
-# Hold-to-talk hotkey mode (optional)
-# sudo apt install -y gnome-terminal
-# Streaming mode (optional)
-# sudo apt install -y libportaudio2
-# pip install sounddevice websockets
+# Streaming mode + hold-to-talk hotkey mode (optional)
+# sudo apt install -y libportaudio2 gnome-terminal
+# pip install sounddevice
 
 # 3. Start the whisper server (first run downloads ~3GB model)
 docker compose up -d          # GPU (NVIDIA CUDA)
@@ -73,19 +71,19 @@ gsettings set org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:$KE
 | Script | Mode | Description |
 |--------|------|-------------|
 | `dictate.sh` | Toggle (hotkey) | Press shortcut to start, press again to stop and transcribe. Best for keyboard shortcuts. |
-| `dictate-hold-hotkey.sh` | Hold-to-talk (hotkey) | Opens a small terminal to record. Press Enter to stop. Types into the original window. |
+| `dictate-hold-hotkey.sh` | Hold-to-talk (hotkey) | Opens a terminal with real-time streaming transcription. Enter to finish and type, Ctrl+C to cancel. Requires `sounddevice`. |
 | `dictate-hold.sh` | Push-to-talk (terminal) | Run in a terminal, speak, press Enter to stop and transcribe. |
-| `dictate-stream.py` | Streaming (continuous) | Streams audio to the server via WebSocket. Transcribes each utterance in real-time as you speak. |
+| `dictate-stream.py` | Streaming (continuous) | Local VAD detects speech, sends each utterance to the REST API. Transcribes in real-time as you speak. |
 | `transcribe.sh` | CLI | `./scripts/transcribe.sh <file> [lang]` — transcribes an audio file to stdout. |
 
 ### Streaming mode
 
-The streaming script uses the server's WebSocket Realtime API with server-side VAD (voice activity detection). It continuously listens and types each utterance as soon as you finish speaking.
+The streaming script uses local voice activity detection to find speech boundaries, then sends each utterance to the server's REST API for transcription. It continuously listens and types each utterance as soon as you finish speaking.
 
 ```bash
 # Install dependencies
 sudo apt install -y libportaudio2
-pip install sounddevice websockets
+pip install sounddevice
 
 # Stream continuously — types each utterance as you speak
 ./scripts/dictate-stream.py
@@ -107,6 +105,9 @@ Override defaults via environment variables:
 | `DICTATION_MIN_DURATION` | `0.5` | Minimum recording duration in seconds |
 | `DICTATION_MIN_ENERGY` | `500` | Minimum RMS energy (silence filter threshold) |
 | `DICTATION_PASTE_DELAY` | `0.3` | Seconds to wait after Ctrl+V before restoring clipboard |
+| `DICTATION_VAD_ENERGY` | `500` | Streaming mode: RMS energy threshold for speech detection |
+| `DICTATION_VAD_SILENCE_MS` | `800` | Streaming mode: silence duration (ms) to end an utterance |
+| `DICTATION_VAD_MIN_SPEECH_MS` | `300` | Streaming mode: minimum speech duration (ms) to accept |
 
 ```bash
 # Example: transcribe Spanish audio
@@ -159,7 +160,7 @@ sudo usermod -aG input $USER          # then re-login
 | Compose file | `docker-compose.yml` | `docker-compose.cpu.yml` |
 | Image | `speaches:0.9.0-rc.3-cuda` | `speaches:0.9.0-rc.3-cpu` |
 | Compute | NVIDIA CUDA (float16) | CPU (int8) |
-| VRAM/RAM | ~1GB VRAM | ~2GB RAM |
+| VRAM/RAM | ~600MB VRAM | ~2GB RAM |
 | Port | `10300` (localhost) | `10300` (localhost) |
 | Model cache | Docker volume `faster-whisper-models` | Docker volume `faster-whisper-models` |
 

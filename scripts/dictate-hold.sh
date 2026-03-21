@@ -27,7 +27,7 @@ notify "🎤 Recording..." "Press Enter to stop"
 
 start_recording "$AUDIO_FILE"
 
-# Wait for Enter key (or the process gets killed by key release)
+# Wait for Enter key to stop recording
 read -r -s 2>/dev/null || true
 stop_recording
 

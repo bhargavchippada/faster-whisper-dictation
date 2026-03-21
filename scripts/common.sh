@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # Shared config and helpers for faster-whisper scripts
 
+# Ensure common paths are available (keyboard shortcuts have minimal PATH)
+for _p in "$HOME/.local/bin" "/home/linuxbrew/.linuxbrew/bin" "$HOME/miniconda3/bin"; do
+  [[ -d "$_p" ]] && [[ ":$PATH:" != *":$_p:"* ]] && PATH="$_p:$PATH"
+done
+export PATH
+
 WHISPER_BASE_URL="${WHISPER_BASE_URL:-http://localhost:10300}"
 WHISPER_URL="$WHISPER_BASE_URL/v1/audio/transcriptions"
 WHISPER_MODEL="${WHISPER_MODEL:-Systran/faster-whisper-large-v3}"

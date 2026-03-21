@@ -49,6 +49,8 @@ if [[ -n "$stored_pid" ]] && kill -0 "$stored_pid" 2>/dev/null && \
   notify "🎤 Processing..." "Transcribing audio"
   check_health
   transcribe "$AUDIO_FILE"
+  # Release lock before typing (prevents xclip from inheriting the flock fd)
+  exec 9>&-
   type_text "$text"
   notify "✅ Dictated" "${text:0:80}"
 else
