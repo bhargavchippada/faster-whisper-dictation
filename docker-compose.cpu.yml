@@ -1,25 +1,18 @@
 services:
   faster-whisper:
-    image: ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cuda
+    image: ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cpu
     container_name: faster-whisper
     restart: unless-stopped
     ports:
       - "127.0.0.1:10300:10300"
     environment:
-      - WHISPER__INFERENCE_DEVICE=cuda
-      - WHISPER__COMPUTE_TYPE=float16
+      - WHISPER__INFERENCE_DEVICE=cpu
+      - WHISPER__COMPUTE_TYPE=int8
       - UVICORN_HOST=0.0.0.0
       - UVICORN_PORT=10300
       - PRELOAD_MODELS=["Systran/faster-whisper-large-v3"]
     volumes:
       - faster-whisper-models:/home/ubuntu/.cache/huggingface
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
 
 volumes:
   faster-whisper-models:

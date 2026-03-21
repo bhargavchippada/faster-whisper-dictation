@@ -4,7 +4,8 @@
 #   Press shortcut → recording starts (notification shown)
 #   Press shortcut again → recording stops, transcribes, types result
 #
-# Dependencies: pw-record (pipewire), curl, xdotool, xclip, notify-send (libnotify)
+# Dependencies: pw-record (pipewire), curl, notify-send (libnotify), python3
+#   X11: xdotool, xclip | Wayland: wl-clipboard, ydotool
 # Server: http://localhost:10300 (faster-whisper-server)
 
 set -euo pipefail
@@ -13,9 +14,14 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/common.sh"
 
 PIDFILE="$TMP_DIR/rec.pid"
+LOCKFILE="$TMP_DIR/rec.lock"
 AUDIO_FILE="$TMP_DIR/recording.wav"
 
 cleanup() { rm -f "$AUDIO_FILE" "$PIDFILE"; }
+
+# Prevent race conditions from rapid hotkey presses
+exec 9>"$LOCKFILE"
+flock -n 9 || exit 0
 
 # Read PID safely — empty string if file missing/empty
 stored_pid=$(cat "$PIDFILE" 2>/dev/null) || stored_pid=""
@@ -25,16 +31,22 @@ if [[ -n "$stored_pid" ]] && kill -0 "$stored_pid" 2>/dev/null && \
    [[ "$(cat /proc/"$stored_pid"/comm 2>/dev/null)" == "pw-record" ]]; then
   # ── STOP recording ──
   kill "$stored_pid" 2>/dev/null || true
-  wait "$stored_pid" 2>/dev/null || true
+  # Wait for pw-record to flush and exit (not a child, so wait(1) won't work)
+  for _ in $(seq 1 60); do
+    kill -0 "$stored_pid" 2>/dev/null || break
+    sleep 0.05
+  done
+  kill -9 "$stored_pid" 2>/dev/null || true
   rm -f "$PIDFILE"
   trap cleanup EXIT
-  notify "🎤 Processing..." "Transcribing audio"
 
   if [[ ! -s "$AUDIO_FILE" ]]; then
     notify "❌ Error" "No audio recorded"
     exit 1
   fi
 
+  check_audio "$AUDIO_FILE" || exit 1
+  notify "🎤 Processing..." "Transcribing audio"
   check_health
   transcribe "$AUDIO_FILE"
   type_text "$text"
