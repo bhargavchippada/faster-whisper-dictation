@@ -1,0 +1,25 @@
+services:
+  faster-whisper:
+    image: fedirz/faster-whisper-server:latest-cuda
+    container_name: faster-whisper
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:10300:10300"
+    environment:
+      - WHISPER__MODEL=large-v3
+      - WHISPER__DEVICE=cuda
+      - WHISPER__COMPUTE_TYPE=float16
+      - UVICORN_HOST=0.0.0.0
+      - UVICORN_PORT=10300
+    volumes:
+      - faster-whisper-models:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  faster-whisper-models:
