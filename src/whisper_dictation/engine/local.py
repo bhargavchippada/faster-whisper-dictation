@@ -94,4 +94,6 @@ class LocalEngine(TranscriptionEngine):
             return False
 
     def close(self) -> None:
+        if self._model is not None and hasattr(self._model, "close"):
+            self._model.close()
         self._model = None

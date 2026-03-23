@@ -328,10 +328,14 @@ def cmd_transcribe(args: argparse.Namespace) -> None:
             print(f"File not found: {args.file}", file=sys.stderr)
             sys.exit(1)
 
-        with wave.open(args.file, "rb") as w:
-            sr = w.getframerate()
-            frames = w.readframes(w.getnframes())
-            audio = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
+        try:
+            with wave.open(args.file, "rb") as w:
+                sr = w.getframerate()
+                frames = w.readframes(w.getnframes())
+                audio = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
+        except wave.Error as e:
+            print(f"Cannot read audio file (WAV format required): {e}", file=sys.stderr)
+            sys.exit(1)
 
         text = engine.transcribe(audio, sr)
         if text:

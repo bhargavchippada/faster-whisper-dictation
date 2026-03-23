@@ -85,6 +85,17 @@ class TestNotifyMacosEscape:
         assert '\\"hello\\"' in script
         assert "\\\\\\\\" in script or "path" in script
 
+    @patch("whisper_dictation.notifier.sys")
+    @patch("whisper_dictation.notifier.subprocess.run")
+    def test_escapes_carriage_return(self, mock_run, mock_sys):
+        """Test AppleScript escape handles carriage returns."""
+        mock_sys.platform = "darwin"
+        notify("Title\r", "Body\r")
+
+        mock_run.assert_called_once()
+        script = mock_run.call_args[0][0][2]
+        assert "\r" not in script
+
 
 class TestNotifyWindows:
     @patch("whisper_dictation.notifier.sys")

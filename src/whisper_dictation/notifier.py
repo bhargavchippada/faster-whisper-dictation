@@ -23,7 +23,8 @@ def notify(title: str, message: str = "") -> None:
             def _applescript_escape(s: str) -> str:
                 import re
 
-                s = s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+                s = s.replace("\\", "\\\\").replace('"', '\\"')
+                s = s.replace("\n", "\\n").replace("\r", "\\r")
                 return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", s)
 
             safe_title = _applescript_escape(title)

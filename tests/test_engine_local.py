@@ -231,6 +231,14 @@ class TestClose:
         engine.close()
         assert engine._model is None
 
+    def test_close_calls_model_close_if_available(self, engine):
+        mock_model = MagicMock()
+        mock_model.close = MagicMock()
+        engine._model = mock_model
+        engine.close()
+        mock_model.close.assert_called_once()
+        assert engine._model is None
+
     def test_close_when_no_model(self, engine):
         engine.close()
         assert engine._model is None

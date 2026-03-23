@@ -42,7 +42,11 @@ class DictationDaemon:
         self._lock = threading.Lock()
 
     def _on_audio_chunk(self, audio: np.ndarray) -> None:
-        """Called for each audio chunk from the microphone."""
+        """Called for each audio chunk from the microphone.
+
+        Note: reads _recording without the lock for performance in the
+        audio callback hot path. Safe on CPython due to the GIL.
+        """
         if not self._recording:
             return
 

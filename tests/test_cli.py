@@ -625,6 +625,26 @@ class TestCmdTranscribe:
         with pytest.raises(SystemExit):
             cmd_transcribe(args)
 
+    def test_transcribe_record_duration_too_long(self):
+        args = _make_transcribe_args(record=91.0)
+        with pytest.raises(SystemExit):
+            cmd_transcribe(args)
+
+    def test_transcribe_invalid_wav_file(self, tmp_path):
+        """Test transcribe rejects non-WAV files with clear error."""
+        bad_file = tmp_path / "notawav.wav"
+        bad_file.write_bytes(b"this is not a WAV file")
+
+        from whisper_dictation.config import Config
+
+        mock_engine = MagicMock()
+        with (
+            patch("whisper_dictation.cli.load_config", return_value=Config()),
+            patch("whisper_dictation.engine.create_engine", return_value=mock_engine),
+            pytest.raises(SystemExit),
+        ):
+            cmd_transcribe(_make_transcribe_args(file=str(bad_file)))
+
     def test_transcribe_file(self, tmp_path):
         from whisper_dictation.config import Config
 
