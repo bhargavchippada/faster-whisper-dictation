@@ -26,40 +26,44 @@ except ValueError:
 _PYNPUT_SELECT_THROTTLE_S = _PYNPUT_POLL_MS / 1000.0
 
 
-def _throttle_pynput_xrecord(listener: object) -> None:
-    """Patch pynput's X11 listener to avoid 100% CPU idle spin.
+def _throttle_pynput_xrecord() -> None:
+    """Patch python-xlib's Display class to avoid 100% CPU idle spin.
 
     pynput's XRecord backend (python-xlib) calls select() with timeout=0
-    in a tight loop, burning CPU even when no keys are pressed.  This
-    patches the XRecord display's send_and_recv to enforce a minimum
-    select timeout of 10ms, reducing idle CPU from ~100% to ~0%.
+    in its recv/flush path, burning CPU even when no keys are pressed.
+    This patches Display.send_and_recv at the class level to enforce a
+    minimum select timeout, reducing idle CPU from ~100% to ~0%.
 
-    Safe no-op on non-X11 platforms (macOS/Windows) where the attribute
-    doesn't exist.
+    Must be called BEFORE pynput creates its Display instances (i.e.,
+    before keyboard.Listener.start()).
+
+    Safe no-op on non-X11 platforms where Xlib is not available.
     """
     try:
-        display = getattr(listener, "_display_record", None)
-        if display is None:
-            return
+        from Xlib.protocol.display import Display
 
-        original = display.send_and_recv
+        original = Display.send_and_recv
 
-        def throttled_send_and_recv(flush=False, event=False, request=None, recv=False):
+        def throttled_send_and_recv(self, flush=False, event=False, request=None, recv=False):
             import select as _select
 
             if recv or flush:
-                # Only throttle the polling paths (recv/flush use timeout=0)
-                sock = getattr(display, "socket", None)
+                sock = getattr(self, "socket", None)
                 if sock is not None:
                     ready, _, _ = _select.select([sock], [], [], _PYNPUT_SELECT_THROTTLE_S)
                     if not ready:
-                        return  # nothing to read, skip this cycle
-            return original(flush=flush, event=event, request=request, recv=recv)
+                        return
+            return original(self, flush=flush, event=event, request=request, recv=recv)
 
-        display.send_and_recv = throttled_send_and_recv
-        log.debug("Throttled pynput XRecord polling to %.0fms", _PYNPUT_SELECT_THROTTLE_S * 1000)
+        Display.send_and_recv = throttled_send_and_recv
+        log.debug(
+            "Throttled Xlib XRecord polling to %.0fms",
+            _PYNPUT_SELECT_THROTTLE_S * 1000,
+        )
+    except ImportError:
+        pass  # not on X11, no Xlib
     except Exception:
-        log.debug("Could not throttle pynput XRecord (non-X11?)", exc_info=True)
+        log.debug("Could not throttle Xlib XRecord", exc_info=True)
 
 
 def _parse_hotkey(binding: str) -> tuple[set[str], str]:
@@ -225,10 +229,10 @@ class HotkeyListener:
                         return
                     self._handle_release()
 
+        _throttle_pynput_xrecord()  # must patch Xlib BEFORE listener.start()
         self._listener = keyboard.Listener(on_press=on_press, on_release=on_release)
         self._listener.daemon = True
         self._listener.start()
-        _throttle_pynput_xrecord(self._listener)
         log.info("Hotkey listener started (pynput): %s [%s mode]", self.binding, self.mode)
 
     def _start_evdev(self) -> None:
