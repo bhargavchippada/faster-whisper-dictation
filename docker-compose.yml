@@ -4,7 +4,9 @@ services:
     container_name: whisperlive
     restart: unless-stopped
     ports:
-      - "127.0.0.1:9090:9090"
+      - "127.0.0.1:9090:9090"   # WebSocket (streaming)
+    volumes:
+      - whisper-cache:/root/.cache/whisper-live
     deploy:
       resources:
         reservations:
@@ -12,3 +14,14 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+    command: >
+      python run_server.py
+        --port 9090
+        --backend faster_whisper
+        -fw Systran/faster-whisper-large-v3
+        --max_clients 4
+        --max_connection_time 600
+        --omp_num_threads 4
+
+volumes:
+  whisper-cache:
