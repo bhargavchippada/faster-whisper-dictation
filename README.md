@@ -1,171 +1,217 @@
 # faster-whisper-dictation
 
-Local speech-to-text dictation powered by [Speaches](https://github.com/speaches-ai/speaches) (formerly faster-whisper-server). Speak, transcribe, and type — fully offline, no cloud APIs, no data leaves your machine.
+Real-time speech-to-text dictation powered by [faster-whisper](https://github.com/SYSTRAN/faster-whisper). Speak and watch text appear instantly in any application — fully offline, no cloud APIs, no data leaves your machine.
 
 ## How it works
 
 ```
- Microphone ──▶ pw-record ──▶ Whisper server ──▶ type into focused app
- (PipeWire)     (16kHz WAV)   (GPU or CPU, Docker)  (xdotool/xclip or wl-copy/ydotool)
+Microphone ──▶ Silero VAD ──▶ Whisper Server ──▶ Type into focused app
+(sounddevice)  (local)        (REST API)         (platform-native)
 ```
 
-Audio is recorded through PipeWire, sent to a local Dockerized Whisper server for transcription, and the result is typed into whatever window has focus. Supports both X11 and Wayland.
+Audio is captured from your microphone, speech boundaries are detected locally using [Silero VAD](https://github.com/snakers4/silero-vad), each utterance is sent to a Whisper server for transcription, and the result is typed into whatever application has focus — in real-time, as you speak.
 
-## Requirements
+## Features
 
-- **Docker** (with [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) for GPU mode)
-- **Linux** with X11 or Wayland
-- **PipeWire** for audio capture
+- **Real-time streaming** — text appears as you speak, not after you stop
+- **Hold-to-talk** — hold the hotkey to dictate, release to stop
+- **Toggle mode** — press hotkey to start, press again to stop
+- **Configurable hotkey** — default `Alt+V`, fully customizable
+- **Cross-platform** — Linux (X11 + Wayland), macOS, Windows
+- **Flexible backend** — works with any OpenAI-compatible STT server (local Docker, remote, Groq, etc.)
+- **Local engine fallback** — optional built-in faster-whisper engine, no server needed
+- **Fully offline** — all processing happens on your machine
+
+## Install
+
+Requires Python 3.10+.
+
+```bash
+# Install with uv (recommended)
+uv tool install faster-whisper-dictation
+
+# Or with pipx
+pipx install faster-whisper-dictation
+
+# Or with pip
+pip install faster-whisper-dictation
+```
+
+### Optional: local engine (no Docker server needed)
+
+```bash
+# CPU only
+uv tool install "faster-whisper-dictation[local]"
+
+# With NVIDIA GPU acceleration
+uv tool install "faster-whisper-dictation[local-gpu]"
+```
+
+### Platform dependencies
+
+**Linux (X11):**
+```bash
+sudo apt install -y xdotool xclip libportaudio2 libnotify-bin
+```
+
+**Linux (Wayland):**
+```bash
+sudo apt install -y wl-clipboard ydotool libportaudio2 libnotify-bin
+sudo systemctl enable --now ydotool
+sudo usermod -aG input $USER   # then re-login
+```
+
+**macOS / Windows:** No additional system dependencies needed.
 
 ## Quick start
 
+### Option A: With Docker server (recommended for GPU users)
+
 ```bash
-# 1. Clone
-git clone https://github.com/bhargavchippada/faster-whisper-dictation.git
+# 1. Clone and start the whisper server
+git clone https://github.com/yourusername/faster-whisper-dictation.git
 cd faster-whisper-dictation
 
-# 2. Install dependencies
-# X11
-sudo apt install -y pipewire curl xdotool xclip libnotify-bin python3
-# Wayland (instead of xdotool/xclip)
-# sudo apt install -y wl-clipboard ydotool
-# Streaming mode + hold-to-talk hotkey mode (optional)
-# sudo apt install -y libportaudio2 gnome-terminal
-# pip install sounddevice
-
-# 3. Start the whisper server (first run downloads ~3GB model)
 docker compose up -d          # GPU (NVIDIA CUDA)
-# docker compose -f docker-compose.cpu.yml up -d   # CPU fallback (no GPU needed)
+# docker compose -f docker-compose.cpu.yml up -d   # CPU fallback
 
-# 4. Verify the server is running
-curl http://localhost:10300/health
+# 2. Start dictation (toggle mode)
+faster-whisper-dictation start
 
-# 5. Test with a recording
-pw-record --rate 16000 --channels 1 --format s16 /tmp/test.wav &
-sleep 5 && kill $!
-./scripts/transcribe.sh /tmp/test.wav
+# 3. Press Alt+V to start/stop dictation
 ```
 
-## Setting up a keyboard shortcut
-
-**GNOME Settings** → Keyboard → Custom Shortcuts:
-
-| Field | Value |
-|-------|-------|
-| Name | Dictation |
-| Command | `/full/path/to/scripts/dictate.sh` |
-| Shortcut | `Alt+V` (or your preference) |
-
-Or via CLI:
+### Option B: Local engine (no Docker needed)
 
 ```bash
-KEYBINDING_PATH="/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/custom0/"
-gsettings set org.gnome.settings-daemon.plugins.media-keys custom-keybindings "['$KEYBINDING_PATH']"
-gsettings set org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:$KEYBINDING_PATH name "Dictation"
-gsettings set org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:$KEYBINDING_PATH command "$PWD/scripts/dictate.sh"
-gsettings set org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:$KEYBINDING_PATH binding "<Alt>v"
+# Install with local engine support
+uv tool install "faster-whisper-dictation[local]"
+
+# Start with local engine (downloads model on first run, ~3GB)
+faster-whisper-dictation start --engine local
 ```
 
-## Scripts
-
-| Script | Mode | Description |
-|--------|------|-------------|
-| `dictate.sh` | Toggle (hotkey) | Press shortcut to start, press again to stop and transcribe. Best for keyboard shortcuts. |
-| `dictate-hold-hotkey.sh` | Hold-to-talk (hotkey) | Opens a terminal with real-time streaming transcription. Enter to finish and type, Ctrl+C to cancel. Requires `sounddevice`. |
-| `dictate-hold.sh` | Push-to-talk (terminal) | Run in a terminal, speak, press Enter to stop and transcribe. |
-| `dictate-stream.py` | Streaming (continuous) | Local VAD detects speech, sends each utterance to the REST API. Transcribes in real-time as you speak. |
-| `transcribe.sh` | CLI | `./scripts/transcribe.sh <file> [lang]` — transcribes an audio file to stdout. |
-
-### Streaming mode
-
-The streaming script uses local voice activity detection to find speech boundaries, then sends each utterance to the server's REST API for transcription. It continuously listens and types each utterance as soon as you finish speaking.
+## Usage
 
 ```bash
-# Install dependencies
-sudo apt install -y libportaudio2
-pip install sounddevice
+# Start the dictation daemon (toggle mode, default)
+faster-whisper-dictation start
 
-# Stream continuously — types each utterance as you speak
-./scripts/dictate-stream.py
+# Start in hold-to-talk mode
+faster-whisper-dictation start --mode hold
 
-# Transcribe a single utterance then exit
-./scripts/dictate-stream.py --once
+# Use a custom hotkey
+faster-whisper-dictation start --hotkey "ctrl+shift+d"
 
-# Print to stdout only (no typing) — used by dictate-hold-hotkey.sh
-./scripts/dictate-stream.py --no-type
+# Use a different server
+faster-whisper-dictation start --server-url http://my-server:10300
+
+# Use local engine instead of server
+faster-whisper-dictation start --engine local
+
+# Check status
+faster-whisper-dictation status
+
+# Stop the daemon
+faster-whisper-dictation stop
+
+# Transcribe a file
+faster-whisper-dictation transcribe recording.wav
 ```
 
 ## Configuration
 
-Override defaults via environment variables:
+Settings can be configured via CLI flags, environment variables, or config file.
+
+Config file location: `~/.config/faster-whisper-dictation/config.toml`
+
+```toml
+[server]
+url = "http://localhost:10300"
+model = "Systran/faster-whisper-large-v3"
+language = "en"
+
+[hotkey]
+binding = "alt+v"       # any key combo supported by your platform
+mode = "toggle"         # "toggle" or "hold"
+
+[vad]
+threshold = 0.5         # Silero VAD confidence threshold (0.0-1.0)
+silence_ms = 800        # silence duration to end an utterance
+min_speech_ms = 250     # minimum speech duration to accept
+
+[audio]
+sample_rate = 16000
+channels = 1
+device = null           # null = system default, or device name/index
+
+[engine]
+type = "server"         # "server" or "local"
+compute_type = "float16" # "float16" (GPU), "int8" (CPU), "auto"
+device = "auto"          # "auto", "cuda", "cpu"
+```
+
+### Environment variables
+
+All config options can be overridden via environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `WHISPER_BASE_URL` | `http://localhost:10300` | Whisper server URL |
-| `WHISPER_MODEL` | `Systran/faster-whisper-large-v3` | Model name ([options](https://huggingface.co/Systran)) |
+| `WHISPER_SERVER_URL` | `http://localhost:10300` | Whisper server URL |
+| `WHISPER_MODEL` | `Systran/faster-whisper-large-v3` | Model name |
 | `WHISPER_LANG` | `en` | Language code |
-| `DICTATION_TMP_DIR` | `/tmp/dictation-<uid>` | Temp directory for recordings |
-| `DICTATION_MIN_DURATION` | `0.5` | Minimum recording duration in seconds |
-| `DICTATION_MIN_ENERGY` | `500` | Minimum RMS energy (silence filter threshold) |
-| `DICTATION_PASTE_DELAY` | `0.3` | Seconds to wait after Ctrl+V before restoring clipboard |
-| `DICTATION_VAD_ENERGY` | `500` | Streaming mode: RMS energy threshold for speech detection |
-| `DICTATION_VAD_SILENCE_MS` | `800` | Streaming mode: silence duration (ms) to end an utterance |
-| `DICTATION_VAD_MIN_SPEECH_MS` | `300` | Streaming mode: minimum speech duration (ms) to accept |
+| `DICTATION_HOTKEY` | `alt+v` | Hotkey binding |
+| `DICTATION_MODE` | `toggle` | `toggle` or `hold` |
+| `DICTATION_ENGINE` | `server` | `server` or `local` |
 
-```bash
-# Example: transcribe Spanish audio
-WHISPER_LANG=es ./scripts/transcribe.sh audio.wav
+## Architecture
+
+```
+faster-whisper-dictation/
+├── src/whisper_dictation/
+│   ├── __init__.py
+│   ├── cli.py              # CLI entry points
+│   ├── config.py            # Configuration management
+│   ├── daemon.py            # Background daemon
+│   ├── engine/
+│   │   ├── __init__.py
+│   │   ├── base.py          # Engine interface
+│   │   ├── server.py        # REST API engine (Option B)
+│   │   └── local.py         # Local faster-whisper engine (Option A)
+│   ├── hotkey/
+│   │   ├── __init__.py
+│   │   ├── listener.py      # Platform-aware hotkey detection
+│   │   └── platform.py      # Platform detection utilities
+│   ├── audio.py             # Audio capture and VAD
+│   ├── vad.py               # Silero VAD wrapper
+│   ├── typer.py             # Platform-aware text input
+│   └── notifier.py          # Cross-platform notifications
+├── docker-compose.yml       # GPU server
+├── docker-compose.cpu.yml   # CPU server
+├── pyproject.toml
+└── README.md
 ```
 
-## CPU mode
+### Engine modes
 
-No NVIDIA GPU? Use the CPU compose file instead:
+| Mode | Backend | Setup | Best for |
+|------|---------|-------|----------|
+| **Server** (default) | Docker container with Speaches | `docker compose up -d` | GPU users, shared servers, flexibility |
+| **Local** | Built-in faster-whisper | `pip install faster-whisper-dictation[local]` | Simple setup, single-user, offline |
 
-```bash
-docker compose -f docker-compose.cpu.yml up -d
-```
+Both engines expose the same interface — the dictation daemon doesn't care where transcription happens.
 
-This uses `int8` quantization for lower memory usage. Transcription will be slower but works on any machine. The default `docker-compose.yml` uses NVIDIA CUDA with `float16` for real-time speed.
+## Docker server
 
-## API
-
-The server exposes an OpenAI-compatible transcription endpoint:
-
-```bash
-curl http://localhost:10300/v1/audio/transcriptions \
-  -F "file=@audio.wav" \
-  -F "model=Systran/faster-whisper-large-v3" \
-  -F "language=en"
-# {"text": "transcribed text here"}
-```
-
-## Wayland support
-
-Scripts auto-detect X11 vs Wayland via `$XDG_SESSION_TYPE` and use the appropriate tools:
-
-| | X11 | Wayland |
-|--|-----|---------|
-| Clipboard | `xclip` | `wl-copy` / `wl-paste` |
-| Key simulation | `xdotool` | `ydotool` |
-
-For Wayland, install `wl-clipboard` and `ydotool`:
-
-```bash
-sudo apt install wl-clipboard ydotool
-sudo systemctl enable --now ydotool   # ydotool needs its daemon running
-sudo usermod -aG input $USER          # then re-login
-```
-
-## Docker details
+The server component runs [Speaches](https://github.com/speaches-ai/speaches), which provides an OpenAI-compatible transcription API.
 
 | Setting | GPU mode | CPU mode |
 |---------|----------|----------|
 | Compose file | `docker-compose.yml` | `docker-compose.cpu.yml` |
 | Image | `speaches:0.9.0-rc.3-cuda` | `speaches:0.9.0-rc.3-cpu` |
 | Compute | NVIDIA CUDA (float16) | CPU (int8) |
-| VRAM/RAM | ~600MB VRAM | ~2GB RAM |
+| Memory | ~600MB VRAM | ~2GB RAM |
 | Port | `10300` (localhost) | `10300` (localhost) |
-| Model cache | Docker volume `faster-whisper-models` | Docker volume `faster-whisper-models` |
 
 ```bash
 docker compose up -d      # start
@@ -173,15 +219,27 @@ docker compose logs -f    # view logs
 docker compose down       # stop
 ```
 
+## API compatibility
+
+The server exposes an OpenAI-compatible transcription endpoint. You can point `faster-whisper-dictation` at any compatible server:
+
+```bash
+# Use with a remote server
+faster-whisper-dictation start --server-url https://my-whisper.example.com
+
+# Use with Groq
+faster-whisper-dictation start --server-url https://api.groq.com/openai
+```
+
 ## Troubleshooting
 
-- **"Whisper server is not running"** — Run `docker compose up -d` and wait for the model to load. Check `docker compose logs`.
-- **Transcribes as "Thank you"** — Whisper hallucination from silence. The silence filter should catch this, but verify your mic works: `pw-record --rate 16000 --channels 1 --format s16 /tmp/test.wav` then `pw-play /tmp/test.wav`.
-- **"Too short" or "Audio too quiet"** — The silence filter rejected the recording. Adjust thresholds: `DICTATION_MIN_DURATION=0.3` or `DICTATION_MIN_ENERGY=200`.
-- **Text appears in wrong window** — Text is pasted into the currently focused window. Make sure focus is correct before transcription finishes.
-- **ydotool not working** — Ensure the daemon is running (`sudo systemctl start ydotool`) and your user is in the `input` group.
-- **Hold-hotkey terminal opens and closes immediately** — Usually `sounddevice` not installed for the python3 in your PATH. Run `python3 -c "import sounddevice"` to check. Install with `pip install sounddevice`. If using a keyboard shortcut, the PATH may differ from your terminal — see `common.sh` PATH augmentation.
-- **Hold-hotkey does nothing (no terminal)** — A stale lock from a previous run. Check with `fuser /tmp/dictation-$(id -u)/hold-hotkey.lock` and kill the listed process, or `rm /tmp/dictation-$(id -u)/hold-hotkey.lock`.
+- **Hotkey not responding** — Check `faster-whisper-dictation status`. If not running, start with `faster-whisper-dictation start`. On Wayland, ensure your user is in the `input` group.
+- **"Server not reachable"** — Start the Docker server: `docker compose up -d`. Or use local engine: `--engine local`.
+- **No text appears** — Verify your microphone works: `faster-whisper-dictation transcribe --record 5` to record and transcribe 5 seconds.
+- **Wrong microphone** — List devices with `faster-whisper-dictation devices` and set in config: `audio.device = "fifine Microphone"`.
+- **Text appears in wrong window** — Text is typed into the focused window at the moment transcription completes. Keep focus on the target application.
+- **Whisper hallucinations ("Thank you")** — The Silero VAD filters silence, but you can increase the threshold: `vad.threshold = 0.7`.
+- **ydotool not working (Wayland)** — Ensure the daemon is running (`sudo systemctl start ydotool`) and your user is in the `input` group.
 
 ## Contributing
 
@@ -189,8 +247,9 @@ Contributions are welcome. Please open an issue first to discuss what you'd like
 
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feature/my-change`)
-3. Commit your changes
-4. Open a pull request
+3. Install dev dependencies: `uv sync --dev`
+4. Run tests: `uv run pytest`
+5. Open a pull request
 
 ## License
 

@@ -1,0 +1,69 @@
+[project]
+name = "faster-whisper-dictation"
+version = "0.1.0"
+description = "Real-time speech-to-text dictation powered by faster-whisper"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    { name = "Bhargav Chippada" },
+]
+keywords = ["whisper", "dictation", "speech-to-text", "stt", "voice-typing"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+]
+
+dependencies = [
+    "sounddevice>=0.4",
+    "numpy>=1.24",
+    "pynput>=1.7",
+    "requests>=2.28",
+    "tomli>=2.0; python_version < '3.11'",
+    "platformdirs>=4.0",
+    "plyer>=2.1",
+]
+
+[project.optional-dependencies]
+local = [
+    "faster-whisper>=1.0",
+    "onnxruntime>=1.16",
+]
+local-gpu = [
+    "faster-whisper>=1.0",
+    "onnxruntime-gpu>=1.16",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+faster-whisper-dictation = "whisper_dictation.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/bhargavchippada/faster-whisper-dictation"
+Repository = "https://github.com/bhargavchippada/faster-whisper-dictation"
+Issues = "https://github.com/bhargavchippada/faster-whisper-dictation/issues"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/whisper_dictation"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
