@@ -192,21 +192,15 @@ class TestUseEvdev:
             mock_sys.platform = "darwin"
             assert listener._use_evdev() is False
 
-    def test_linux_x11(self):
-        listener = HotkeyListener("alt+v", "toggle", MagicMock(), MagicMock())
-        with (
-            patch("whisper_dictation.hotkey.listener.sys") as mock_sys,
-            patch.dict("os.environ", {"XDG_SESSION_TYPE": "x11"}),
-        ):
-            mock_sys.platform = "linux"
-            assert listener._use_evdev() is False
-
-    def test_linux_wayland_with_evdev(self):
+    def test_linux_with_evdev_and_permissions(self):
+        """evdev is preferred on all Linux when available and readable."""
         listener = HotkeyListener("alt+v", "toggle", MagicMock(), MagicMock())
         mock_evdev = MagicMock()
+        mock_evdev.list_devices.return_value = ["/dev/input/event0"]
+        mock_dev = MagicMock()
+        mock_evdev.InputDevice.return_value = mock_dev
         with (
             patch("whisper_dictation.hotkey.listener.sys") as mock_sys,
-            patch.dict("os.environ", {"XDG_SESSION_TYPE": "wayland"}),
             patch.dict("sys.modules", {"evdev": mock_evdev}),
             patch(
                 "builtins.__import__",
@@ -217,19 +211,66 @@ class TestUseEvdev:
         ):
             mock_sys.platform = "linux"
             assert listener._use_evdev() is True
+        mock_dev.close.assert_called_once()
 
-    def test_linux_wayland_without_evdev(self):
+    def test_linux_evdev_no_devices(self):
+        """Falls back to pynput when evdev finds no input devices."""
+        listener = HotkeyListener("alt+v", "toggle", MagicMock(), MagicMock())
+        mock_evdev = MagicMock()
+        mock_evdev.list_devices.return_value = []
+        with (
+            patch("whisper_dictation.hotkey.listener.sys") as mock_sys,
+            patch.dict("sys.modules", {"evdev": mock_evdev}),
+            patch(
+                "builtins.__import__",
+                side_effect=lambda name, *a, **kw: (
+                    mock_evdev if name == "evdev" else __import__(name, *a, **kw)
+                ),
+            ),
+        ):
+            mock_sys.platform = "linux"
+            assert listener._use_evdev() is False
+
+    def test_linux_evdev_permission_denied(self):
+        """Falls back to pynput when input devices aren't readable."""
+        listener = HotkeyListener("alt+v", "toggle", MagicMock(), MagicMock())
+        mock_evdev = MagicMock()
+        mock_evdev.list_devices.return_value = ["/dev/input/event0"]
+        mock_evdev.InputDevice.side_effect = PermissionError("not in input group")
+        with (
+            patch("whisper_dictation.hotkey.listener.sys") as mock_sys,
+            patch.dict("sys.modules", {"evdev": mock_evdev}),
+            patch(
+                "builtins.__import__",
+                side_effect=lambda name, *a, **kw: (
+                    mock_evdev if name == "evdev" else __import__(name, *a, **kw)
+                ),
+            ),
+        ):
+            mock_sys.platform = "linux"
+            assert listener._use_evdev() is False
+
+    def test_linux_without_evdev_x11(self):
+        """Falls back to pynput on X11 when evdev is not installed."""
+        listener = HotkeyListener("alt+v", "toggle", MagicMock(), MagicMock())
+        with (
+            patch("whisper_dictation.hotkey.listener.sys") as mock_sys,
+            patch.dict("os.environ", {"XDG_SESSION_TYPE": "x11"}),
+        ):
+            mock_sys.platform = "linux"
+            with patch.dict("sys.modules", {"evdev": None}):
+                assert listener._use_evdev() is False
+
+    def test_linux_without_evdev_wayland_warns(self):
+        """Warns on Wayland when evdev is not installed."""
         listener = HotkeyListener("alt+v", "toggle", MagicMock(), MagicMock())
         with (
             patch("whisper_dictation.hotkey.listener.sys") as mock_sys,
             patch.dict("os.environ", {"XDG_SESSION_TYPE": "wayland"}),
         ):
             mock_sys.platform = "linux"
-            # Remove evdev if it exists
             with patch.dict("sys.modules", {"evdev": None}):
-                # The import inside _use_evdev will fail
                 result = listener._use_evdev()
-                # Falls back to False when evdev import fails
                 assert result is False
 
 
@@ -480,6 +521,149 @@ class TestStartEvdev:
             listener._start_evdev()
             mock_thread.assert_called_once_with(target=listener._evdev_loop, daemon=True)
             mock_thread_instance.start.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# _throttle_pynput_xrecord
+# ---------------------------------------------------------------------------
+
+
+class TestThrottlePynputXrecord:
+    def test_patches_display_send_and_recv(self):
+        """Test throttle patches the XRecord display's send_and_recv."""
+        from whisper_dictation.hotkey.listener import _throttle_pynput_xrecord
+
+        mock_listener = MagicMock()
+        mock_display = MagicMock()
+        original = mock_display.send_and_recv
+        mock_listener._display_record = mock_display
+
+        _throttle_pynput_xrecord(mock_listener)
+
+        # send_and_recv should be replaced with the throttled version
+        assert mock_display.send_and_recv is not original
+
+    def test_noop_when_no_display_record(self):
+        """Test throttle is a safe no-op on non-X11 platforms."""
+        from whisper_dictation.hotkey.listener import _throttle_pynput_xrecord
+
+        mock_listener = MagicMock(spec=[])  # no _display_record attribute
+        # Should not raise
+        _throttle_pynput_xrecord(mock_listener)
+
+    def test_noop_on_exception(self):
+        """Test throttle handles unexpected errors gracefully."""
+        from whisper_dictation.hotkey.listener import _throttle_pynput_xrecord
+
+        mock_listener = MagicMock()
+        mock_listener._display_record = property(lambda self: (_ for _ in ()).throw(RuntimeError))
+
+        # Should not raise
+        _throttle_pynput_xrecord(mock_listener)
+
+    def test_throttled_recv_sleeps_when_no_data(self):
+        """Test the throttled send_and_recv uses select with timeout."""
+        from whisper_dictation.hotkey.listener import _throttle_pynput_xrecord
+
+        mock_listener = MagicMock()
+        mock_display = MagicMock()
+        mock_display.socket = MagicMock()
+        original_fn = MagicMock()
+        mock_display.send_and_recv = original_fn
+        mock_listener._display_record = mock_display
+
+        _throttle_pynput_xrecord(mock_listener)
+        throttled = mock_display.send_and_recv
+
+        # Call with recv=True (the polling path)
+        with patch("select.select", return_value=([], [], [])) as mock_select:
+            throttled(recv=True)
+
+        # Should have called select with the throttle timeout
+        mock_select.assert_called_once()
+        timeout = mock_select.call_args[0][3]
+        assert timeout >= 0.01  # at least 10ms
+        # Original should NOT be called (no data ready)
+        original_fn.assert_not_called()
+
+    def test_throttled_recv_calls_original_when_data_ready(self):
+        """Test the throttled send_and_recv calls original when data is ready."""
+        from whisper_dictation.hotkey.listener import _throttle_pynput_xrecord
+
+        mock_listener = MagicMock()
+        mock_display = MagicMock()
+        mock_socket = MagicMock()
+        mock_display.socket = mock_socket
+        original_fn = MagicMock(return_value="result")
+        mock_display.send_and_recv = original_fn
+        mock_listener._display_record = mock_display
+
+        _throttle_pynput_xrecord(mock_listener)
+        throttled = mock_display.send_and_recv
+
+        with patch("select.select", return_value=([mock_socket], [], [])):
+            result = throttled(recv=True)
+
+        original_fn.assert_called_once()
+        assert result == "result"
+
+    def test_throttled_event_path_not_throttled(self):
+        """Test the event= path passes through without throttling."""
+        from whisper_dictation.hotkey.listener import _throttle_pynput_xrecord
+
+        mock_listener = MagicMock()
+        mock_display = MagicMock()
+        original_fn = MagicMock(return_value="event_result")
+        mock_display.send_and_recv = original_fn
+        mock_listener._display_record = mock_display
+
+        _throttle_pynput_xrecord(mock_listener)
+        throttled = mock_display.send_and_recv
+
+        result = throttled(event=True)
+        original_fn.assert_called_once_with(flush=False, event=True, request=None, recv=False)
+        assert result == "event_result"
+
+    def test_poll_ms_configurable(self):
+        """Test DICTATION_HOTKEY_POLL_MS env var is respected."""
+        import importlib
+
+        import whisper_dictation.hotkey.listener as mod
+
+        with patch.dict("os.environ", {"DICTATION_HOTKEY_POLL_MS": "50"}):
+            importlib.reload(mod)
+            assert mod._PYNPUT_POLL_MS == 50
+            assert mod._PYNPUT_SELECT_THROTTLE_S == 0.05
+
+        # Restore default
+        with patch.dict("os.environ", {}, clear=True):
+            importlib.reload(mod)
+
+    def test_poll_ms_minimum_enforced(self):
+        """Test that poll ms can't go below 10ms."""
+        import importlib
+
+        import whisper_dictation.hotkey.listener as mod
+
+        with patch.dict("os.environ", {"DICTATION_HOTKEY_POLL_MS": "1"}):
+            importlib.reload(mod)
+            assert mod._PYNPUT_POLL_MS == 10  # clamped to minimum
+
+        with patch.dict("os.environ", {}, clear=True):
+            importlib.reload(mod)
+
+    def test_poll_ms_invalid_uses_default(self):
+        """Test that invalid poll ms uses default."""
+        import importlib
+
+        import whisper_dictation.hotkey.listener as mod
+
+        with patch.dict("os.environ", {"DICTATION_HOTKEY_POLL_MS": "abc"}):
+            importlib.reload(mod)
+            assert mod._PYNPUT_POLL_MS == 10  # default
+
+        with patch.dict("os.environ", {}, clear=True):
+            importlib.reload(mod)
 
 
 class TestEvdevLoop:

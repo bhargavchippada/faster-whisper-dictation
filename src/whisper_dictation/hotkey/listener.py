@@ -13,6 +13,54 @@ from collections.abc import Callable
 
 log = logging.getLogger(__name__)
 
+# Minimum select() timeout to prevent pynput's XRecord backend from
+# busy-looping on X11.  python-xlib uses timeout=0 in its recv/flush
+# path, which causes select() to return immediately → 100% CPU.
+# Default 10ms (~100 Hz poll, imperceptible).  Configurable via env var.
+_MIN_THROTTLE_MS = 10
+_raw_throttle = os.environ.get("DICTATION_HOTKEY_POLL_MS", str(_MIN_THROTTLE_MS))
+try:
+    _PYNPUT_POLL_MS = max(_MIN_THROTTLE_MS, int(_raw_throttle))
+except ValueError:
+    _PYNPUT_POLL_MS = _MIN_THROTTLE_MS
+_PYNPUT_SELECT_THROTTLE_S = _PYNPUT_POLL_MS / 1000.0
+
+
+def _throttle_pynput_xrecord(listener: object) -> None:
+    """Patch pynput's X11 listener to avoid 100% CPU idle spin.
+
+    pynput's XRecord backend (python-xlib) calls select() with timeout=0
+    in a tight loop, burning CPU even when no keys are pressed.  This
+    patches the XRecord display's send_and_recv to enforce a minimum
+    select timeout of 10ms, reducing idle CPU from ~100% to ~0%.
+
+    Safe no-op on non-X11 platforms (macOS/Windows) where the attribute
+    doesn't exist.
+    """
+    try:
+        display = getattr(listener, "_display_record", None)
+        if display is None:
+            return
+
+        original = display.send_and_recv
+
+        def throttled_send_and_recv(flush=False, event=False, request=None, recv=False):
+            import select as _select
+
+            if recv or flush:
+                # Only throttle the polling paths (recv/flush use timeout=0)
+                sock = getattr(display, "socket", None)
+                if sock is not None:
+                    ready, _, _ = _select.select([sock], [], [], _PYNPUT_SELECT_THROTTLE_S)
+                    if not ready:
+                        return  # nothing to read, skip this cycle
+            return original(flush=flush, event=event, request=request, recv=recv)
+
+        display.send_and_recv = throttled_send_and_recv
+        log.debug("Throttled pynput XRecord polling to %.0fms", _PYNPUT_SELECT_THROTTLE_S * 1000)
+    except Exception:
+        log.debug("Could not throttle pynput XRecord (non-X11?)", exc_info=True)
+
 
 def _parse_hotkey(binding: str) -> tuple[set[str], str]:
     """Parse a hotkey string like 'alt+v' into (modifiers, key).
@@ -54,22 +102,45 @@ class HotkeyListener:
         self._last_toggle_time = 0.0
 
     def _use_evdev(self) -> bool:
-        """Check if we should use evdev (Linux Wayland)."""
+        """Check if we should use evdev (Linux).
+
+        Prefer evdev on all Linux — pynput's XRecord backend busy-loops
+        on X11, consuming 100% CPU even when idle.  evdev uses select()
+        on /dev/input devices, which blocks properly.
+
+        Falls back to pynput if evdev is not installed or input devices
+        are not readable (user not in 'input' group).
+        """
         if sys.platform != "linux":
             return False
-        session_type = os.environ.get("XDG_SESSION_TYPE", "")
-        if session_type == "wayland":
-            try:
-                import evdev  # noqa: F401
+        try:
+            import evdev
 
-                return True
-            except ImportError:
+            # Verify we can actually read input devices
+            devices = evdev.list_devices()
+            if not devices:
+                log.info("evdev: no input devices found, falling back to pynput")
+                return False
+            # Try opening the first device to check permissions
+            try:
+                dev = evdev.InputDevice(devices[0])
+                dev.close()
+            except PermissionError:
+                log.info(
+                    "evdev: no permission to read input devices "
+                    "(add user to 'input' group), falling back to pynput"
+                )
+                return False
+            return True
+        except ImportError:
+            session_type = os.environ.get("XDG_SESSION_TYPE", "")
+            if session_type == "wayland":
                 log.warning(
                     "Wayland detected but python-evdev not installed. "
                     "Falling back to pynput (may not work). "
                     "Install with: pip install evdev"
                 )
-        return False
+            return False
 
     def start(self) -> None:
         """Start listening for the hotkey in a background thread."""
@@ -157,6 +228,7 @@ class HotkeyListener:
         self._listener = keyboard.Listener(on_press=on_press, on_release=on_release)
         self._listener.daemon = True
         self._listener.start()
+        _throttle_pynput_xrecord(self._listener)
         log.info("Hotkey listener started (pynput): %s [%s mode]", self.binding, self.mode)
 
     def _start_evdev(self) -> None:
