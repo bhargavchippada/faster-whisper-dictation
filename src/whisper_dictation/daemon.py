@@ -64,7 +64,10 @@ class DictationDaemon:
             return
 
         if self._use_ws and self._ws_engine is not None:
-            self._ws_engine.send_audio(audio)
+            try:
+                self._ws_engine.send_audio(audio)
+            except Exception:
+                log.error("WS audio send failed", exc_info=True)
         elif self.streaming:
             self._on_audio_chunk_streaming(audio)
         else:
@@ -145,6 +148,9 @@ class DictationDaemon:
         except Exception:
             log.error("Failed to start audio capture", exc_info=True)
             audio.stop()
+            if self._ws_engine is not None:
+                self._ws_engine.close()
+                self._ws_engine = None
             with self._lock:
                 self._recording = False
                 self._audio = None

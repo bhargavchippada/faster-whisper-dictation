@@ -84,6 +84,11 @@ class TestResample16kTo24k:
         resampled = _resample_16k_to_24k(audio)
         assert len(resampled) == 768  # 512 * 3 / 2
 
+    def test_empty_array(self):
+        audio = np.array([], dtype=np.float32)
+        resampled = _resample_16k_to_24k(audio)
+        assert len(resampled) == 0
+
     def test_preserves_values(self):
         audio = np.ones(100, dtype=np.float32) * 0.5
         resampled = _resample_16k_to_24k(audio)

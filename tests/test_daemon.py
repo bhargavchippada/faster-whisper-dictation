@@ -590,6 +590,40 @@ class TestWebSocketStreaming:
 
         mock_ws.send_audio.assert_called_once()
 
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_ws_audio_chunk_send_error_caught(self, mock_create):
+        """WS streaming: send_audio exception is caught, not propagated."""
+        mock_create.return_value = MagicMock()
+        daemon = DictationDaemon(Config(), streaming=True)
+        daemon._recording = True
+
+        mock_ws = MagicMock()
+        mock_ws.send_audio.side_effect = RuntimeError("encode error")
+        daemon._ws_engine = mock_ws
+
+        # Should not raise — exception is caught in audio callback
+        daemon._on_audio_chunk(np.zeros(512, dtype=np.float32))
+
+    @patch("whisper_dictation.daemon.notify")
+    @patch("whisper_dictation.daemon.AudioStream")
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_ws_activate_audio_failure_closes_ws(self, mock_create, mock_audio_cls, mock_notify):
+        """WS streaming: audio start failure closes and clears WebSocket engine."""
+        mock_create.return_value = MagicMock()
+        mock_audio = MagicMock()
+        mock_audio.start.side_effect = RuntimeError("no mic")
+        mock_audio_cls.return_value = mock_audio
+        daemon = DictationDaemon(Config(), streaming=True)
+
+        with patch("whisper_dictation.daemon.WebSocketEngine") as mock_ws_cls:
+            mock_ws = MagicMock()
+            mock_ws_cls.return_value = mock_ws
+            daemon._on_activate()
+
+        mock_ws.close.assert_called_once()
+        assert daemon._ws_engine is None
+        assert daemon._recording is False
+
     @patch("whisper_dictation.daemon.notify")
     @patch("whisper_dictation.daemon.create_engine")
     def test_ws_deactivate_flushes_and_closes(self, mock_create, mock_notify):

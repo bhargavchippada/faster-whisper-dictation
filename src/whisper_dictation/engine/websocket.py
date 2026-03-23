@@ -9,7 +9,7 @@ import queue
 import threading
 import time
 from collections.abc import Callable
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlencode, urlparse, urlunparse
 
 import numpy as np
 import websockets.sync.client as ws_sync
@@ -63,6 +63,8 @@ def _build_audio_commit() -> dict:
 def _resample_16k_to_24k(audio: np.ndarray) -> np.ndarray:
     """Resample 16kHz audio to 24kHz using linear interpolation (ratio 3:2)."""
     n = len(audio)
+    if n == 0:
+        return audio
     new_n = n * 3 // 2
     indices = np.arange(new_n) * (n - 1) / (new_n - 1) if new_n > 1 else np.array([0.0])
     return np.interp(indices, np.arange(n), audio)
@@ -130,10 +132,10 @@ class WebSocketEngine:
     def ws_url(self) -> str:
         """Construct the WebSocket URL with model and language query params."""
         base = _http_to_ws_url(self._server_url)
-        url = f"{base}/v1/realtime?intent=transcription&model={self._model}"
+        params = {"intent": "transcription", "model": self._model}
         if self._language:
-            url += f"&language={self._language}"
-        return url
+            params["language"] = self._language
+        return f"{base}/v1/realtime?{urlencode(params)}"
 
     def connect(self) -> None:
         """Open WebSocket connection with retry, start sender/receiver threads."""
