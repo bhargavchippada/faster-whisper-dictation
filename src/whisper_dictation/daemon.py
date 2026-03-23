@@ -46,7 +46,12 @@ class DictationDaemon:
         if not self._recording:
             return
 
-        complete, utterance = self._vad.process_chunk(audio)
+        try:
+            complete, utterance = self._vad.process_chunk(audio)
+        except Exception:
+            log.error("VAD processing failed", exc_info=True)
+            return
+
         if complete and utterance is not None:
             # Transcribe in background thread to not block audio capture
             threading.Thread(
@@ -57,10 +62,13 @@ class DictationDaemon:
 
     def _transcribe_and_type(self, audio: np.ndarray) -> None:
         """Transcribe audio and type the result."""
-        text = self._engine.transcribe(audio, self.config.audio.sample_rate)
-        if text:
-            type_text(text + " ")
-            log.debug("Typed: %d chars", len(text))
+        try:
+            text = self._engine.transcribe(audio, self.config.audio.sample_rate)
+            if text:
+                type_text(text + " ")
+                log.debug("Typed: %d chars", len(text))
+        except Exception:
+            log.error("Transcription or typing failed", exc_info=True)
 
     def _on_activate(self) -> None:
         """Hotkey pressed — start recording."""
@@ -74,7 +82,14 @@ class DictationDaemon:
         self._vad.reset()
 
         self._audio = AudioStream(self.config.audio, self._on_audio_chunk)
-        self._audio.start()
+        try:
+            self._audio.start()
+        except Exception:
+            log.error("Failed to start audio capture", exc_info=True)
+            self._audio = None
+            with self._lock:
+                self._recording = False
+            notify("Error", "Could not access microphone")
 
     def _on_deactivate(self) -> None:
         """Hotkey released/toggled — stop recording."""

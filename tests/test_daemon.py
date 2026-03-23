@@ -207,6 +207,24 @@ class TestOnActivate:
         # Should not create a new audio stream
         mock_audio_cls.assert_not_called()
 
+    @patch("whisper_dictation.daemon.notify")
+    @patch("whisper_dictation.daemon.AudioStream")
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_activate_audio_start_failure(self, mock_create, mock_audio_cls, mock_notify):
+        """Test _on_activate recovers when audio stream fails to start."""
+        mock_create.return_value = MagicMock()
+        mock_audio = MagicMock()
+        mock_audio.start.side_effect = RuntimeError("no microphone")
+        mock_audio_cls.return_value = mock_audio
+
+        daemon = DictationDaemon(Config())
+        daemon._on_activate()
+
+        # Should have recovered — recording set back to False
+        assert daemon._recording is False
+        assert daemon._audio is None
+        mock_notify.assert_any_call("Error", "Could not access microphone")
+
 
 # ---------------------------------------------------------------------------
 # _on_deactivate
@@ -331,6 +349,19 @@ class TestOnAudioChunk:
             daemon._on_audio_chunk(np.zeros(512, dtype=np.float32))
             mock_thread.assert_not_called()
 
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_vad_exception_logged_not_raised(self, mock_create):
+        """Test _on_audio_chunk catches VAD processing exceptions."""
+        mock_create.return_value = MagicMock()
+        daemon = DictationDaemon(Config())
+        daemon._recording = True
+
+        with patch.object(
+            daemon._vad, "process_chunk", side_effect=RuntimeError("VAD error")
+        ):
+            # Should not raise
+            daemon._on_audio_chunk(np.zeros(512, dtype=np.float32))
+
 
 # ---------------------------------------------------------------------------
 # _transcribe_and_type
@@ -361,6 +392,31 @@ class TestTranscribeAndType:
         daemon._transcribe_and_type(np.zeros(16000, dtype=np.float32))
 
         mock_type_text.assert_not_called()
+
+    @patch("whisper_dictation.daemon.type_text")
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_transcribe_exception_logged_not_raised(self, mock_create, mock_type_text):
+        """Test _transcribe_and_type catches exceptions instead of crashing."""
+        mock_engine = MagicMock()
+        mock_engine.transcribe.side_effect = RuntimeError("server down")
+        mock_create.return_value = mock_engine
+
+        daemon = DictationDaemon(Config())
+        # Should not raise
+        daemon._transcribe_and_type(np.zeros(16000, dtype=np.float32))
+        mock_type_text.assert_not_called()
+
+    @patch("whisper_dictation.daemon.type_text", side_effect=RuntimeError("typing failed"))
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_type_text_exception_logged_not_raised(self, mock_create, mock_type_text):
+        """Test _transcribe_and_type catches typing exceptions."""
+        mock_engine = MagicMock()
+        mock_engine.transcribe.return_value = "hello"
+        mock_create.return_value = mock_engine
+
+        daemon = DictationDaemon(Config())
+        # Should not raise
+        daemon._transcribe_and_type(np.zeros(16000, dtype=np.float32))
 
 
 # ---------------------------------------------------------------------------

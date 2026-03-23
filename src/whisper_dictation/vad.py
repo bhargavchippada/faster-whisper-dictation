@@ -6,19 +6,31 @@ import hashlib
 import logging
 import os
 import threading
+from urllib.parse import urlparse
 
 import numpy as np
 
 log = logging.getLogger(__name__)
 
+# Silero VAD requires exactly 32ms audio windows for inference.
+_SILERO_CHUNK_MS = 32
+
 # Silero VAD ONNX model — pinned to a specific release for reproducibility.
 # Updated when a new faster-whisper-dictation version is released.
 # Users who need a different version can set DICTATION_VAD_MODEL_URL to override.
 _ONNX_MODEL_SHA256 = "1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3"
-_ONNX_MODEL_URL = os.environ.get(
-    "DICTATION_VAD_MODEL_URL",
-    "https://github.com/snakers4/silero-vad/raw/v5.1.2/src/silero_vad/data/silero_vad.onnx",
+_DEFAULT_ONNX_MODEL_URL = (
+    "https://github.com/snakers4/silero-vad/raw/v5.1.2/src/silero_vad/data/silero_vad.onnx"
 )
+_ONNX_MODEL_URL = os.environ.get("DICTATION_VAD_MODEL_URL", _DEFAULT_ONNX_MODEL_URL)
+
+# Validate custom URL scheme at import time
+if _ONNX_MODEL_URL != _DEFAULT_ONNX_MODEL_URL:
+    _parsed = urlparse(_ONNX_MODEL_URL)
+    if _parsed.scheme not in ("http", "https"):
+        raise ValueError(
+            f"DICTATION_VAD_MODEL_URL must use http or https scheme, got: {_parsed.scheme!r}"
+        )
 
 # Lazy-loaded model (protected by _model_lock).
 # Typed as union because torch.hub.load returns an opaque callable, not OnnxVAD.
@@ -83,7 +95,8 @@ def _load_onnx_model() -> None:
         log.info("Downloading Silero VAD ONNX model...")
         is_custom_url = "DICTATION_VAD_MODEL_URL" in os.environ
         try:
-            urllib.request.urlretrieve(_ONNX_MODEL_URL, tmp)
+            with urllib.request.urlopen(_ONNX_MODEL_URL, timeout=60) as resp:
+                tmp.write_bytes(resp.read())
             if not is_custom_url:
                 _verify_model_hash(tmp, _ONNX_MODEL_SHA256)
             else:
@@ -152,10 +165,10 @@ class SpeechDetector:
     ) -> None:
         self.sample_rate = sample_rate
         self.threshold = threshold
-        self.silence_chunks = silence_ms // 32  # 32ms per chunk for Silero
-        self.min_speech_chunks = min_speech_ms // 32
-        self.max_speech_chunks = int(max_speech_s * 1000 / 32)
-        self.chunk_size = sample_rate * 32 // 1000  # 512 samples at 16kHz
+        self.silence_chunks = silence_ms // _SILERO_CHUNK_MS
+        self.min_speech_chunks = min_speech_ms // _SILERO_CHUNK_MS
+        self.max_speech_chunks = int(max_speech_s * 1000 / _SILERO_CHUNK_MS)
+        self.chunk_size = sample_rate * _SILERO_CHUNK_MS // 1000  # 512 samples at 16kHz
         self._lock = threading.Lock()
 
         self._is_speaking = False
@@ -283,4 +296,10 @@ class SpeechDetector:
 
     @property
     def is_speaking(self) -> bool:
+        """Whether speech is currently being detected.
+
+        Note: reads _is_speaking without the lock for performance in the
+        audio callback hot path. Safe on CPython due to the GIL, but the
+        value may be briefly stale on other implementations.
+        """
         return self._is_speaking

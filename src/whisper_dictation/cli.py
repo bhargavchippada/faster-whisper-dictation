@@ -8,6 +8,7 @@ import logging
 import os
 import signal
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 from .config import (
@@ -32,8 +33,6 @@ def _apply_cli_overrides(
     server_url: str | None = None,
 ) -> Config:
     """Apply CLI flag overrides to a config, returning a new Config."""
-    from dataclasses import replace
-
     hotkey_cfg = config.hotkey
     if mode:
         hotkey_cfg = replace(hotkey_cfg, mode=mode)

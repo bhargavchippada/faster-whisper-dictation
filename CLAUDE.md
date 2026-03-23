@@ -38,15 +38,18 @@ src/whisper_dictation/
 
 - **No command injection**: All subprocess calls use list arguments, never shell=True or f-strings.
   Windows clipboard uses Win32 API directly instead of PowerShell to avoid injection.
-- **Clipboard hygiene**: Previous clipboard contents are saved before paste and restored after.
+- **Clipboard hygiene**: Previous clipboard contents are saved before paste and restored after
+  via `finally` blocks to ensure restoration even on exceptions.
   Wayland `wl-copy` uses `--` to prevent argument injection from text starting with `-`.
 - **PID file locking**: PID file uses `fcntl.flock` for exclusive access on Unix, with `os.kill(pid, 0)` for liveness checks. Lock fd stored in module-level `_pid_lock_fd`.
 - **No network exposure**: Docker server binds to `127.0.0.1` only. Audio never leaves localhost.
-- **VAD model integrity**: ONNX model is fetched from GitHub over HTTPS, verified via SHA-256 hash, and cached locally. Hash mismatch deletes the file and raises `RuntimeError`.
+- **VAD model integrity**: ONNX model is fetched from GitHub over HTTPS with a 60s timeout, verified via SHA-256 hash, and cached locally. Hash mismatch deletes the file and raises `RuntimeError`. Custom model URLs (`DICTATION_VAD_MODEL_URL`) are validated to use http/https scheme at import time.
 - **Windows clipboard safety**: `OpenClipboard` return values are checked; allocated memory is freed on failure.
-- **Server URL validation**: `_validate()` checks that `server.url` uses http/https scheme and has a valid hostname. Prevents SSRF via config injection.
+- **Server URL validation**: `validate()` checks that `server.url` uses http/https scheme and has a valid hostname. Prevents SSRF via config injection.
 - **Input validation**: Config values are type-checked via frozen dataclasses with explicit validation. Environment variable overrides are coerced with clear error messages on type mismatch.
 - **Paste delay validation**: `DICTATION_PASTE_DELAY` is validated at import time (must be 0.0-10.0, rejects NaN/Inf).
+- **Error resilience**: Transcription and typing exceptions are caught and logged without crashing the daemon. Audio stream start failures reset recording state and notify the user.
+- **AppleScript sanitization**: Notification messages strip null bytes and control characters before interpolation into AppleScript strings.
 
 ## Development
 
@@ -80,7 +83,7 @@ GitHub Actions runs on every push/PR to main:
 - Python 3.10, 3.11, 3.12, 3.13, 3.14 matrix
 - Lint with ruff
 - Tests with coverage gate (minimum 80%)
-- 279 tests, 100% coverage
+- 292 tests, 100% coverage
 
 ## Config Priority (highest to lowest)
 

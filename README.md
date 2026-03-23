@@ -245,7 +245,7 @@ faster-whisper-dictation/
 │   ├── vad.py              # Silero VAD (ONNX, SHA-256 verified)
 │   ├── typer.py            # Platform-aware text input (clipboard + paste)
 │   └── notifier.py         # Cross-platform desktop notifications
-├── tests/                  # 279 tests, 100% coverage
+├── tests/                  # 292 tests, 100% coverage
 ├── .github/workflows/      # CI: lint + test on Python 3.10-3.14
 ├── docker-compose.yml      # GPU server
 ├── docker-compose.cpu.yml  # CPU server
@@ -303,9 +303,9 @@ faster-whisper-dictation start --server-url https://api.groq.com/openai
 ## Security
 
 - **No command injection** — all subprocess calls use list arguments, never `shell=True`. Windows clipboard uses Win32 API directly (no PowerShell). Wayland uses `--` separator to prevent flag injection.
-- **Clipboard hygiene** — previous clipboard is saved before paste and restored after, under a thread lock to prevent concurrent corruption.
+- **Clipboard hygiene** — previous clipboard is saved before paste and restored after via `finally` blocks, under a thread lock to prevent concurrent corruption.
 - **PID file locking** — exclusive `fcntl.flock` prevents duplicate daemon instances (falls back to simple PID on Windows).
-- **Model integrity** — ONNX VAD model is SHA-256 verified after download. Partial downloads are atomically cleaned up.
+- **Model integrity** — ONNX VAD model is SHA-256 verified after download with a 60s timeout. Partial downloads are atomically cleaned up. Custom model URLs validated to use http/https.
 - **Config validation** — all values validated with clear error messages. Server URLs checked for http/https scheme. Invalid env vars rejected at startup.
 - **No network exposure** — Docker server binds to `127.0.0.1` only by default.
 - **No telemetry** — zero data collection, no phone-home, no analytics.

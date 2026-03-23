@@ -21,7 +21,10 @@ def notify(title: str, message: str = "") -> None:
         elif sys.platform == "darwin":
             # Escape characters that break AppleScript string literals
             def _applescript_escape(s: str) -> str:
-                return s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+                import re
+
+                s = s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+                return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", s)
 
             safe_title = _applescript_escape(title)
             safe_message = _applescript_escape(message)

@@ -46,17 +46,18 @@ def _type_linux_x11(text: str) -> None:
         input=text.encode(),
         check=False,
     )
-    subprocess.run(
-        ["xdotool", "key", "--clearmodifiers", "ctrl+v"],
-        check=False,
-    )
-    time.sleep(PASTE_DELAY)
-
-    subprocess.run(
-        ["xclip", "-selection", "clipboard"],
-        input=prev.encode(),
-        check=False,
-    )
+    try:
+        subprocess.run(
+            ["xdotool", "key", "--clearmodifiers", "ctrl+v"],
+            check=False,
+        )
+        time.sleep(PASTE_DELAY)
+    finally:
+        subprocess.run(
+            ["xclip", "-selection", "clipboard"],
+            input=prev.encode(),
+            check=False,
+        )
 
 
 def _type_linux_wayland(text: str) -> None:
@@ -69,13 +70,14 @@ def _type_linux_wayland(text: str) -> None:
     ).stdout
 
     subprocess.run(["wl-copy", "--", text], check=False)
-    subprocess.run(
-        ["ydotool", "key", "29:1", "47:1", "47:0", "29:0"],
-        check=False,
-    )
-    time.sleep(PASTE_DELAY)
-
-    subprocess.run(["wl-copy", "--", prev], check=False)
+    try:
+        subprocess.run(
+            ["ydotool", "key", "29:1", "47:1", "47:0", "29:0"],
+            check=False,
+        )
+        time.sleep(PASTE_DELAY)
+    finally:
+        subprocess.run(["wl-copy", "--", prev], check=False)
 
 
 def _type_macos(text: str) -> None:
@@ -88,13 +90,12 @@ def _type_macos(text: str) -> None:
     ).stdout
 
     subprocess.run(["pbcopy"], input=text.encode(), check=False)
-    subprocess.run(
-        ["osascript", "-e", 'tell application "System Events" to keystroke "v" using command down'],
-        check=False,
-    )
-    time.sleep(PASTE_DELAY)
-
-    subprocess.run(["pbcopy"], input=prev.encode(), check=False)
+    try:
+        script = 'tell application "System Events" to keystroke "v" using command down'
+        subprocess.run(["osascript", "-e", script], check=False)
+        time.sleep(PASTE_DELAY)
+    finally:
+        subprocess.run(["pbcopy"], input=prev.encode(), check=False)
 
 
 def _type_windows(text: str) -> None:

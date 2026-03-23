@@ -57,6 +57,35 @@ class TestNotifyMacos:
         assert "Something happened" in script
 
 
+class TestNotifyMacosEscape:
+    @patch("whisper_dictation.notifier.sys")
+    @patch("whisper_dictation.notifier.subprocess.run")
+    def test_strips_control_characters(self, mock_run, mock_sys):
+        """Test AppleScript escape strips null bytes and control chars."""
+        mock_sys.platform = "darwin"
+        notify("Title\x00", "Body\x01\x7f")
+
+        mock_run.assert_called_once()
+        script = mock_run.call_args[0][0][2]
+        assert "\x00" not in script
+        assert "\x01" not in script
+        assert "\x7f" not in script
+        assert "Title" in script
+        assert "Body" in script
+
+    @patch("whisper_dictation.notifier.sys")
+    @patch("whisper_dictation.notifier.subprocess.run")
+    def test_escapes_backslash_and_quotes(self, mock_run, mock_sys):
+        """Test AppleScript escape handles backslashes and double quotes."""
+        mock_sys.platform = "darwin"
+        notify('Say "hello"', "path\\to\\file")
+
+        mock_run.assert_called_once()
+        script = mock_run.call_args[0][0][2]
+        assert '\\"hello\\"' in script
+        assert "\\\\\\\\" in script or "path" in script
+
+
 class TestNotifyWindows:
     @patch("whisper_dictation.notifier.sys")
     def test_uses_plyer(self, mock_sys):

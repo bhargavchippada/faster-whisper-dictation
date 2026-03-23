@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -447,16 +446,16 @@ class TestLoadOnnxModel:
         original_model = vad_mod._model
         vad_mod._model = None
 
-        def fake_urlretrieve(url, path):
-            from pathlib import Path
-
-            Path(path).write_bytes(b"custom model")
+        mock_response = MagicMock()
+        mock_response.read.return_value = b"custom model"
+        mock_response.__enter__ = MagicMock(return_value=mock_response)
+        mock_response.__exit__ = MagicMock(return_value=False)
 
         try:
             with (
                 patch("whisper_dictation.vad.OnnxVAD"),
                 patch("platformdirs.user_cache_dir", return_value=str(tmp_path)),
-                patch("urllib.request.urlretrieve", side_effect=fake_urlretrieve),
+                patch("urllib.request.urlopen", return_value=mock_response),
                 patch("whisper_dictation.vad._verify_model_hash") as mock_verify,
                 patch.dict(
                     "os.environ", {"DICTATION_VAD_MODEL_URL": "https://example.com/model.onnx"}
@@ -475,11 +474,10 @@ class TestLoadOnnxModel:
         original_model = vad_mod._model
         vad_mod._model = None
 
-        def fake_urlretrieve(url, path):
-            """Create the temp file so atomic rename works."""
-            from pathlib import Path
-
-            Path(path).write_bytes(b"fake model data")
+        mock_response = MagicMock()
+        mock_response.read.return_value = b"fake model data"
+        mock_response.__enter__ = MagicMock(return_value=mock_response)
+        mock_response.__exit__ = MagicMock(return_value=False)
 
         try:
             mock_ort = MagicMock()
@@ -487,7 +485,7 @@ class TestLoadOnnxModel:
             with (
                 patch("whisper_dictation.vad.OnnxVAD") as mock_onnx_vad,
                 patch("platformdirs.user_cache_dir", return_value=str(tmp_path)),
-                patch("urllib.request.urlretrieve", side_effect=fake_urlretrieve) as mock_download,
+                patch("urllib.request.urlopen", return_value=mock_response) as mock_download,
                 patch("whisper_dictation.vad._verify_model_hash"),
                 patch.dict("sys.modules", {"onnxruntime": mock_ort}),
             ):
@@ -504,15 +502,15 @@ class TestLoadOnnxModel:
         original_model = vad_mod._model
         vad_mod._model = None
 
-        def fake_urlretrieve(url, path):
-            from pathlib import Path
-
-            Path(path).write_bytes(b"bad model data")
+        mock_response = MagicMock()
+        mock_response.read.return_value = b"bad model data"
+        mock_response.__enter__ = MagicMock(return_value=mock_response)
+        mock_response.__exit__ = MagicMock(return_value=False)
 
         try:
             with (
                 patch("platformdirs.user_cache_dir", return_value=str(tmp_path)),
-                patch("urllib.request.urlretrieve", side_effect=fake_urlretrieve),
+                patch("urllib.request.urlopen", return_value=mock_response),
                 patch(
                     "whisper_dictation.vad._verify_model_hash",
                     side_effect=RuntimeError("hash mismatch"),
@@ -537,16 +535,13 @@ class TestLoadOnnxModel:
 
         tmp_file = tmp_path / "silero_vad.tmp"
 
-        def fake_urlretrieve(url, path):
-            from pathlib import Path
-
-            Path(path).write_bytes(b"partial")
-            raise ConnectionError("download interrupted")
-
         try:
             with (
                 patch("platformdirs.user_cache_dir", return_value=str(tmp_path)),
-                patch("urllib.request.urlretrieve", side_effect=fake_urlretrieve),
+                patch(
+                    "urllib.request.urlopen",
+                    side_effect=ConnectionError("download interrupted"),
+                ),
             ):
                 with pytest.raises(ConnectionError, match="download interrupted"):
                     vad_mod._load_onnx_model()
@@ -576,7 +571,7 @@ class TestLoadOnnxModel:
             with (
                 patch("whisper_dictation.vad.OnnxVAD"),
                 patch("platformdirs.user_cache_dir", return_value=str(cache_dir)),
-                patch("urllib.request.urlretrieve") as mock_download,
+                patch("urllib.request.urlopen") as mock_download,
                 patch.dict("sys.modules", {"onnxruntime": mock_ort}),
             ):
                 vad_mod._load_onnx_model()
@@ -588,6 +583,42 @@ class TestLoadOnnxModel:
 # ---------------------------------------------------------------------------
 # _verify_model_hash
 # ---------------------------------------------------------------------------
+
+
+class TestVadModelUrlValidation:
+    def test_invalid_scheme_raises_at_import(self):
+        """Test that file:// scheme in DICTATION_VAD_MODEL_URL is rejected."""
+        import importlib
+        import sys
+
+        saved = sys.modules.pop("whisper_dictation.vad", None)
+        try:
+            with patch.dict("os.environ", {"DICTATION_VAD_MODEL_URL": "file:///etc/passwd"}):
+                with pytest.raises(ValueError, match="must use http or https"):
+                    import whisper_dictation.vad
+
+                    importlib.reload(whisper_dictation.vad)
+        finally:
+            if saved is not None:
+                sys.modules["whisper_dictation.vad"] = saved
+
+    def test_valid_https_custom_url_accepted(self):
+        """Test that https:// custom URL is accepted."""
+        import importlib
+        import sys
+
+        saved = sys.modules.pop("whisper_dictation.vad", None)
+        try:
+            with patch.dict(
+                "os.environ", {"DICTATION_VAD_MODEL_URL": "https://example.com/model.onnx"}
+            ):
+                import whisper_dictation.vad
+
+                importlib.reload(whisper_dictation.vad)
+                # Should not raise
+        finally:
+            if saved is not None:
+                sys.modules["whisper_dictation.vad"] = saved
 
 
 class TestVerifyModelHash:
@@ -733,17 +764,19 @@ class TestLoadOnnxModelCustomUrl:
         original_model = vad_mod._model
         vad_mod._model = None
 
+        mock_response = MagicMock()
+        mock_response.read.return_value = b"fake"
+        mock_response.__enter__ = MagicMock(return_value=mock_response)
+        mock_response.__exit__ = MagicMock(return_value=False)
+
         try:
-
-            def fake_download(url, path):
-                Path(path).write_bytes(b"fake")
-
             with (
                 patch("whisper_dictation.vad.OnnxVAD"),
                 patch("platformdirs.user_cache_dir", return_value=str(tmp_path)),
-                patch("urllib.request.urlretrieve", side_effect=fake_download),
+                patch("urllib.request.urlopen", return_value=mock_response),
                 patch("whisper_dictation.vad._verify_model_hash") as mock_verify,
                 patch.dict("os.environ", {"DICTATION_VAD_MODEL_URL": "http://custom/model.onnx"}),
+                patch.dict("sys.modules", {"onnxruntime": MagicMock()}),
             ):
                 vad_mod._load_onnx_model()
                 mock_verify.assert_not_called()
