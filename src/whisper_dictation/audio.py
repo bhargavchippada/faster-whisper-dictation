@@ -65,7 +65,13 @@ class AudioStream:
         self.block_size = config.sample_rate * block_ms // 1000
         self._stream: sd.InputStream | None = None
 
-    def _audio_callback(self, indata, frames, time_info, status):
+    def _audio_callback(
+        self,
+        indata: np.ndarray,
+        frames: int,
+        time_info: object,
+        status: object,
+    ) -> None:
         if status:
             log.debug("Audio status: %s", status)
         self.callback(indata.copy().flatten())

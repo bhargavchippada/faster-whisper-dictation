@@ -16,8 +16,8 @@ from .config import (
     PID_FILE,
     STATE_FILE,
     Config,
-    _validate,
     load_config,
+    validate,
 )
 
 log = logging.getLogger(__name__)
@@ -130,26 +130,27 @@ def cmd_start(args: argparse.Namespace) -> None:
         engine=args.engine,
         server_url=args.server_url,
     )
-    _validate(config)
+    validate(config)
 
     _write_pid()
 
-    # Write state for status command
+    # Write state for status command (restricted permissions for URL privacy)
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    STATE_FILE.write_text(
-        json.dumps(
-            {
-                "mode": config.hotkey.mode,
-                "hotkey": config.hotkey.binding,
-                "engine": config.engine.type,
-                "server_url": config.server.url,
-            }
-        )
-    )
+    state_data = json.dumps({
+        "mode": config.hotkey.mode,
+        "hotkey": config.hotkey.binding,
+        "engine": config.engine.type,
+        "server_url": config.server.url,
+    })
+    fd = os.open(str(STATE_FILE), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, state_data.encode())
+    finally:
+        os.close(fd)
 
     daemon = DictationDaemon(config)
 
-    def _shutdown(sig, frame):
+    def _shutdown(sig: int, frame: object) -> None:
         daemon.stop()
         _cleanup_pid()
         sys.exit(0)
@@ -308,7 +309,7 @@ def cmd_transcribe(args: argparse.Namespace) -> None:
         engine=args.engine,
         server_url=args.server_url,
     )
-    _validate(config)
+    validate(config)
 
     from .engine import create_engine
 
@@ -316,6 +317,10 @@ def cmd_transcribe(args: argparse.Namespace) -> None:
 
     if args.file:
         import wave
+
+        if not Path(args.file).exists():
+            print(f"File not found: {args.file}", file=sys.stderr)
+            sys.exit(1)
 
         with wave.open(args.file, "rb") as w:
             sr = w.getframerate()
@@ -333,6 +338,12 @@ def cmd_transcribe(args: argparse.Namespace) -> None:
         import sounddevice as sd
 
         duration = args.record
+        if duration <= 0 or duration > config.vad.max_speech_s:
+            print(
+                f"Recording duration must be 0-{config.vad.max_speech_s}s, got {duration}s",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         print(f"Recording {duration}s...", file=sys.stderr)
         audio = sd.rec(
             int(duration * config.audio.sample_rate),

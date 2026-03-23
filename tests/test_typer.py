@@ -315,7 +315,6 @@ class TestWinClipboardSet:
         mock_user32.EmptyClipboard.assert_not_called()
         mock_user32.CloseClipboard.assert_not_called()
 
-
     def test_global_alloc_failure_raises(self):
         mock_ctypes = MagicMock()
         mock_kernel32 = MagicMock()

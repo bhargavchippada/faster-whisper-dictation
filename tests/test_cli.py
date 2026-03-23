@@ -52,17 +52,24 @@ class TestSetupLogging:
 
 class TestPidManagement:
     def test_write_and_read_pid(self, tmp_path):
-        pid_file = tmp_path / "daemon.pid"
-        with (
-            patch("whisper_dictation.cli.CONFIG_DIR", tmp_path),
-            patch("whisper_dictation.cli.PID_FILE", pid_file),
-        ):
-            _write_pid()
-            assert pid_file.exists()
-            assert int(pid_file.read_text()) == os.getpid()
+        import whisper_dictation.cli as cli_mod
 
-            pid = _read_pid()
-            assert pid == os.getpid()
+        pid_file = tmp_path / "daemon.pid"
+        try:
+            with (
+                patch("whisper_dictation.cli.CONFIG_DIR", tmp_path),
+                patch("whisper_dictation.cli.PID_FILE", pid_file),
+            ):
+                _write_pid()
+                assert pid_file.exists()
+                assert int(pid_file.read_text()) == os.getpid()
+
+                pid = _read_pid()
+                assert pid == os.getpid()
+        finally:
+            if cli_mod._pid_lock_fd is not None:
+                os.close(cli_mod._pid_lock_fd)
+                cli_mod._pid_lock_fd = None
 
     def test_read_pid_no_file(self, tmp_path):
         pid_file = tmp_path / "daemon.pid"
@@ -572,6 +579,28 @@ class TestCmdTranscribe:
         args.engine = None
         args.file = None
         args.record = None
+
+        with pytest.raises(SystemExit):
+            cmd_transcribe(args)
+
+    def test_transcribe_file_not_found(self, tmp_path):
+        args = MagicMock()
+        args.config = None
+        args.server_url = None
+        args.engine = None
+        args.file = str(tmp_path / "nonexistent.wav")
+        args.record = None
+
+        with pytest.raises(SystemExit):
+            cmd_transcribe(args)
+
+    def test_transcribe_record_invalid_duration(self, tmp_path):
+        args = MagicMock()
+        args.config = None
+        args.server_url = None
+        args.engine = None
+        args.file = None
+        args.record = -1.0
 
         with pytest.raises(SystemExit):
             cmd_transcribe(args)

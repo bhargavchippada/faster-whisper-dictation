@@ -24,7 +24,7 @@ class LocalEngine(TranscriptionEngine):
         self._compute_type = engine_config.compute_type
         self._device = engine_config.device
 
-    def _ensure_model(self):
+    def _ensure_model(self) -> None:
         if self._model is not None:
             return
 
@@ -82,7 +82,7 @@ class LocalEngine(TranscriptionEngine):
 
         text = " ".join(seg.text.strip() for seg in segments).strip()
         if text:
-            log.debug("Transcribed: %s", text[:80])
+            log.debug("Transcribed: %d chars", len(text))
         return text
 
     def is_available(self) -> bool:

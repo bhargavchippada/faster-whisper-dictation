@@ -77,9 +77,10 @@ uv run ruff check src/ tests/
 ## CI
 
 GitHub Actions runs on every push/PR to main:
-- Python 3.10, 3.11, 3.12, 3.13 matrix
+- Python 3.10, 3.11, 3.12, 3.13, 3.14 matrix
 - Lint with ruff
 - Tests with coverage gate (minimum 80%)
+- 279 tests, 100% coverage
 
 ## Config Priority (highest to lowest)
 

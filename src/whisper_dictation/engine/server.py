@@ -37,7 +37,7 @@ class ServerEngine(TranscriptionEngine):
             resp.raise_for_status()
             text = resp.json().get("text", "").strip()
             if text:
-                log.debug("Transcribed: %s", text[:80])
+                log.debug("Transcribed: %d chars", len(text))
             return text
         except requests.Timeout:
             log.error("Transcription timed out")

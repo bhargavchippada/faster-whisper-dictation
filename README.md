@@ -231,21 +231,22 @@ device = "auto"          # "auto", "cuda", "cpu"
 ```
 faster-whisper-dictation/
 ├── src/whisper_dictation/
-│   ├── cli.py              # CLI entry points
-│   ├── config.py           # Configuration management
-│   ├── daemon.py           # Background daemon
+│   ├── cli.py              # CLI: start, stop, status, config, devices, transcribe
+│   ├── config.py           # TOML config + env vars + CLI flags + validation
+│   ├── daemon.py           # Main daemon: hotkey → audio → VAD → engine → typer
 │   ├── engine/
-│   │   ├── base.py         # Engine interface (ABC)
-│   │   ├── server.py       # REST API engine
+│   │   ├── __init__.py     # create_engine() factory
+│   │   ├── base.py         # TranscriptionEngine ABC
+│   │   ├── server.py       # REST API engine (OpenAI-compatible)
 │   │   └── local.py        # Local faster-whisper engine
 │   ├── hotkey/
-│   │   └── listener.py     # Platform-aware hotkey detection
-│   ├── audio.py            # Audio capture and VAD
-│   ├── vad.py              # Silero VAD wrapper
-│   ├── typer.py            # Platform-aware text input
-│   └── notifier.py         # Cross-platform notifications
-├── tests/                  # 182+ tests, 100% coverage target
-├── .github/workflows/      # CI: lint + test on Python 3.10-3.13
+│   │   └── listener.py     # pynput + evdev hotkey detection
+│   ├── audio.py            # Audio capture via sounddevice
+│   ├── vad.py              # Silero VAD (ONNX, SHA-256 verified)
+│   ├── typer.py            # Platform-aware text input (clipboard + paste)
+│   └── notifier.py         # Cross-platform desktop notifications
+├── tests/                  # 279 tests, 100% coverage
+├── .github/workflows/      # CI: lint + test on Python 3.10-3.14
 ├── docker-compose.yml      # GPU server
 ├── docker-compose.cpu.yml  # CPU server
 └── pyproject.toml          # Package config (uv/pip installable)
@@ -299,6 +300,16 @@ faster-whisper-dictation start --server-url https://my-whisper.example.com
 faster-whisper-dictation start --server-url https://api.groq.com/openai
 ```
 
+## Security
+
+- **No command injection** — all subprocess calls use list arguments, never `shell=True`. Windows clipboard uses Win32 API directly (no PowerShell). Wayland uses `--` separator to prevent flag injection.
+- **Clipboard hygiene** — previous clipboard is saved before paste and restored after, under a thread lock to prevent concurrent corruption.
+- **PID file locking** — exclusive `fcntl.flock` prevents duplicate daemon instances (falls back to simple PID on Windows).
+- **Model integrity** — ONNX VAD model is SHA-256 verified after download. Partial downloads are atomically cleaned up.
+- **Config validation** — all values validated with clear error messages. Server URLs checked for http/https scheme. Invalid env vars rejected at startup.
+- **No network exposure** — Docker server binds to `127.0.0.1` only by default.
+- **No telemetry** — zero data collection, no phone-home, no analytics.
+
 ## Troubleshooting
 
 | Problem | Solution |
@@ -310,6 +321,7 @@ faster-whisper-dictation start --server-url https://api.groq.com/openai
 | Text in wrong window | Text is typed into the focused window when transcription completes. Keep focus on target app. |
 | Whisper hallucinations | Increase VAD threshold: `vad.threshold = 0.7` in config. |
 | ydotool not working | Run `sudo systemctl start ydotool` and add user to `input` group. |
+| Docker volume permission error | `docker compose down && docker volume rm faster-whisper-dictation_faster-whisper-models && docker compose up -d` |
 
 ## Development
 

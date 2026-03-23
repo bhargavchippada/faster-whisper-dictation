@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -446,6 +447,31 @@ class TestLoadModelTorch:
 
 
 class TestLoadOnnxModel:
+    def test_load_onnx_model_custom_url_skips_hash(self, tmp_path):
+        """Test custom VAD model URL skips SHA-256 verification."""
+        import whisper_dictation.vad as vad_mod
+
+        original_model = vad_mod._model
+        vad_mod._model = None
+
+        def fake_urlretrieve(url, path):
+            from pathlib import Path
+            Path(path).write_bytes(b"custom model")
+
+        try:
+            with (
+                patch("whisper_dictation.vad.OnnxVAD"),
+                patch("platformdirs.user_cache_dir", return_value=str(tmp_path)),
+                patch("urllib.request.urlretrieve", side_effect=fake_urlretrieve),
+                patch("whisper_dictation.vad._verify_model_hash") as mock_verify,
+                patch.dict("os.environ", {"DICTATION_VAD_MODEL_URL": "https://example.com/model.onnx"}),
+                patch.dict("sys.modules", {"onnxruntime": MagicMock()}),
+            ):
+                vad_mod._load_onnx_model()
+                mock_verify.assert_not_called()
+        finally:
+            vad_mod._model = original_model
+
     def test_load_onnx_model_downloads_when_missing(self, tmp_path):
         """Test _load_onnx_model downloads model when cache doesn't exist."""
         import whisper_dictation.vad as vad_mod
@@ -517,6 +543,7 @@ class TestLoadOnnxModel:
 
         def fake_urlretrieve(url, path):
             from pathlib import Path
+
             Path(path).write_bytes(b"partial")
             raise ConnectionError("download interrupted")
 
@@ -700,3 +727,28 @@ class TestOnnxVAD:
 
         np.testing.assert_array_equal(vad._h, new_h)
         np.testing.assert_array_equal(vad._c, new_c)
+
+
+class TestLoadOnnxModelCustomUrl:
+    def test_custom_url_skips_hash_verification(self, tmp_path):
+        """Test that a custom VAD model URL skips SHA-256 verification."""
+        import whisper_dictation.vad as vad_mod
+
+        original_model = vad_mod._model
+        vad_mod._model = None
+
+        try:
+            def fake_download(url, path):
+                Path(path).write_bytes(b"fake")
+
+            with (
+                patch("whisper_dictation.vad.OnnxVAD"),
+                patch("platformdirs.user_cache_dir", return_value=str(tmp_path)),
+                patch("urllib.request.urlretrieve", side_effect=fake_download),
+                patch("whisper_dictation.vad._verify_model_hash") as mock_verify,
+                patch.dict("os.environ", {"DICTATION_VAD_MODEL_URL": "http://custom/model.onnx"}),
+            ):
+                vad_mod._load_onnx_model()
+                mock_verify.assert_not_called()
+        finally:
+            vad_mod._model = original_model

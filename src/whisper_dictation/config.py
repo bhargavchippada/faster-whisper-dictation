@@ -159,13 +159,16 @@ def load_config(config_path: Path | None = None) -> Config:
         config = Config()
 
     config = _apply_env_overrides(config)
-    _validate(config)
+    validate(config)
     return config
 
 
-def _validate(config: Config) -> None:
+def validate(config: Config) -> None:
     """Validate config values and raise ValueError with clear messages."""
     errors: list[str] = []
+
+    if not config.server.url:
+        errors.append("server.url must not be empty")
 
     if config.hotkey.mode not in ("toggle", "hold"):
         errors.append(f"hotkey.mode must be 'toggle' or 'hold', got '{config.hotkey.mode}'")
@@ -198,7 +201,7 @@ def _validate(config: Config) -> None:
             errors.append(f"server.url must use http or https scheme, got '{parsed.scheme}'")
         if not parsed.hostname:
             errors.append("server.url must have a valid hostname")
-    except Exception:
+    except (ValueError, TypeError):
         errors.append(f"server.url is not a valid URL: {config.server.url!r}")
 
     if errors:

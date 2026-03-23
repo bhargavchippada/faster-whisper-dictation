@@ -16,8 +16,8 @@ from whisper_dictation.config import (
     VADConfig,
     _apply_env_overrides,
     _build_section,
-    _validate,
     load_config,
+    validate,
 )
 
 # ---------------------------------------------------------------------------
@@ -292,58 +292,58 @@ class TestTomllibImport:
 
 
 # ---------------------------------------------------------------------------
-# _validate
+# validate
 # ---------------------------------------------------------------------------
 
 
 class TestValidate:
     def test_valid_config_passes(self):
-        _validate(Config())  # should not raise
+        validate(Config())  # should not raise
 
     def test_invalid_hotkey_mode(self):
         cfg = Config(hotkey=HotkeyConfig(mode="bad"))
         with pytest.raises(ValueError, match="hotkey.mode"):
-            _validate(cfg)
+            validate(cfg)
 
     def test_invalid_engine_type(self):
         cfg = Config(engine=EngineConfig(type="bad"))
         with pytest.raises(ValueError, match="engine.type"):
-            _validate(cfg)
+            validate(cfg)
 
     def test_vad_threshold_too_high(self):
         cfg = Config(vad=VADConfig(threshold=1.5))
         with pytest.raises(ValueError, match="vad.threshold"):
-            _validate(cfg)
+            validate(cfg)
 
     def test_vad_threshold_negative(self):
         cfg = Config(vad=VADConfig(threshold=-0.1))
         with pytest.raises(ValueError, match="vad.threshold"):
-            _validate(cfg)
+            validate(cfg)
 
     def test_vad_silence_ms_zero(self):
         cfg = Config(vad=VADConfig(silence_ms=0))
         with pytest.raises(ValueError, match="vad.silence_ms"):
-            _validate(cfg)
+            validate(cfg)
 
     def test_vad_min_speech_ms_negative(self):
         cfg = Config(vad=VADConfig(min_speech_ms=-1))
         with pytest.raises(ValueError, match="vad.min_speech_ms"):
-            _validate(cfg)
+            validate(cfg)
 
     def test_vad_max_speech_s_zero(self):
         cfg = Config(vad=VADConfig(max_speech_s=0))
         with pytest.raises(ValueError, match="vad.max_speech_s"):
-            _validate(cfg)
+            validate(cfg)
 
     def test_server_timeout_zero(self):
         cfg = Config(server=ServerConfig(timeout=0))
         with pytest.raises(ValueError, match="server.timeout"):
-            _validate(cfg)
+            validate(cfg)
 
     def test_audio_sample_rate_negative(self):
         cfg = Config(audio=AudioConfig(sample_rate=-1))
         with pytest.raises(ValueError, match="audio.sample_rate"):
-            _validate(cfg)
+            validate(cfg)
 
     def test_multiple_errors(self):
         cfg = Config(
@@ -352,7 +352,7 @@ class TestValidate:
             vad=VADConfig(threshold=5.0),
         )
         with pytest.raises(ValueError, match="hotkey.mode") as exc_info:
-            _validate(cfg)
+            validate(cfg)
         msg = str(exc_info.value)
         assert "engine.type" in msg
         assert "vad.threshold" in msg
@@ -360,22 +360,27 @@ class TestValidate:
     def test_server_url_invalid_scheme(self):
         cfg = Config(server=ServerConfig(url="ftp://example.com"))
         with pytest.raises(ValueError, match="server.url must use http or https"):
-            _validate(cfg)
+            validate(cfg)
 
     def test_server_url_no_hostname(self):
         cfg = Config(server=ServerConfig(url="http://"))
         with pytest.raises(ValueError, match="server.url must have a valid hostname"):
-            _validate(cfg)
+            validate(cfg)
 
     def test_server_url_valid_https(self):
         cfg = Config(server=ServerConfig(url="https://whisper.example.com:8080"))
-        _validate(cfg)  # should not raise
+        validate(cfg)  # should not raise
+
+    def test_server_url_empty_is_invalid(self):
+        cfg = Config(server=ServerConfig(url=""))
+        with pytest.raises(ValueError, match="server.url"):
+            validate(cfg)
 
     def test_server_url_parse_exception(self):
-        """Test _validate catches urlparse exceptions."""
+        """Test validate catches urlparse exceptions on malformed URLs."""
         cfg = Config(server=ServerConfig(url="http://valid.com"))
         with (
-            patch("whisper_dictation.config.urlparse", side_effect=ValueError("bad url")),
+            patch("whisper_dictation.config.urlparse", side_effect=ValueError("bad")),
             pytest.raises(ValueError, match="server.url is not a valid URL"),
         ):
-            _validate(cfg)
+            validate(cfg)

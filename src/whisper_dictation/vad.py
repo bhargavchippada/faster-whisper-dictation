@@ -4,16 +4,20 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import threading
 
 import numpy as np
 
 log = logging.getLogger(__name__)
 
-# SHA-256 hash of the known-good Silero VAD ONNX model
+# Silero VAD ONNX model — pinned to a specific release for reproducibility.
+# Updated when a new faster-whisper-dictation version is released.
+# Users who need a different version can set DICTATION_VAD_MODEL_URL to override.
 _ONNX_MODEL_SHA256 = "1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3"
-_ONNX_MODEL_URL = (
-    "https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx"
+_ONNX_MODEL_URL = os.environ.get(
+    "DICTATION_VAD_MODEL_URL",
+    "https://github.com/snakers4/silero-vad/raw/v5.1.2/src/silero_vad/data/silero_vad.onnx",
 )
 
 # Lazy-loaded model (protected by _model_lock).
@@ -77,9 +81,13 @@ def _load_onnx_model() -> None:
         cache.parent.mkdir(parents=True, exist_ok=True)
         tmp = cache.with_suffix(".tmp")
         log.info("Downloading Silero VAD ONNX model...")
+        is_custom_url = "DICTATION_VAD_MODEL_URL" in os.environ
         try:
             urllib.request.urlretrieve(_ONNX_MODEL_URL, tmp)
-            _verify_model_hash(tmp, _ONNX_MODEL_SHA256)
+            if not is_custom_url:
+                _verify_model_hash(tmp, _ONNX_MODEL_SHA256)
+            else:
+                log.info("Custom VAD model URL — skipping SHA-256 verification")
             tmp.rename(cache)
         except Exception:
             tmp.unlink(missing_ok=True)
@@ -93,7 +101,7 @@ def _load_onnx_model() -> None:
 class OnnxVAD:
     """Minimal Silero VAD wrapper using ONNX Runtime."""
 
-    def __init__(self, model_path: str):
+    def __init__(self, model_path: str) -> None:
         import onnxruntime as ort
 
         opts = ort.SessionOptions()
@@ -141,7 +149,7 @@ class SpeechDetector:
         silence_ms: int = 800,
         min_speech_ms: int = 250,
         max_speech_s: float = 90.0,
-    ):
+    ) -> None:
         self.sample_rate = sample_rate
         self.threshold = threshold
         self.silence_chunks = silence_ms // 32  # 32ms per chunk for Silero
