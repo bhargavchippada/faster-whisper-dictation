@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Real-time speech-to-text dictation tool. Captures microphone audio, detects speech via Silero VAD, transcribes via faster-whisper (REST API or local), and types text into the focused application. Cross-platform (Linux X11/Wayland, macOS, Windows).
+Speech-to-text dictation tool. Captures microphone audio, detects speech boundaries via Silero VAD, transcribes complete utterances via faster-whisper (REST API or local), and types text into the focused application. Batch mode (default) is the primary transcription path; streaming mode is experimental. Cross-platform (Linux X11/Wayland, macOS, Windows).
 
 ## Architecture
 
@@ -34,7 +34,8 @@ src/whisper_dictation/
 - **pynput + evdev**: pynput handles macOS/Windows/X11; evdev handles Linux Wayland where pynput fails. Callbacks fire outside the hotkey lock to prevent deadlocks.
 - **Non-blocking notifications**: `subprocess.Popen` (not `.run`) for Linux/macOS so notifications never block the daemon.
 - **Persistent HTTP session in server mode**: `ServerEngine` reuses a `requests.Session` to reduce per-request overhead when talking to the local STT server.
-- **Legacy scripts remain**: `scripts/` contains older helper utilities; the maintained implementation lives under `src/whisper_dictation/`.
+- **Batch over streaming**: Batch mode sends complete utterances for transcription (highest accuracy). Streaming mode (`--streaming`) is experimental — sends partial audio chunks for real-time output but with lower quality.
+- **Background daemon**: `start -b` uses Unix double-fork (`_daemonize()`) to detach from terminal. Follows Stevens APUE: setsid, chdir("/"), closerange, O_APPEND log, O_CLOEXEC. Logs to `~/.config/faster-whisper-dictation/daemon.log`.
 
 ## Security Considerations
 
@@ -98,7 +99,7 @@ uv build --clear --no-cache
 - No tests should require a running Whisper server, microphone, or display server.
 - Use `unittest.mock.patch` for all external subprocess calls and hardware interfaces.
 - Target: 100% test coverage. All new code must include tests.
-- Current status: 342 tests, 100% line coverage.
+- Current status: 345 tests, 100% line coverage.
 
 ## CI
 
@@ -106,7 +107,7 @@ GitHub Actions runs on every push/PR to main:
 - Python 3.10, 3.11, 3.12, 3.13, 3.14 matrix
 - Lint with ruff
 - Tests with coverage gate (minimum 80%)
-- 342 tests, 100% coverage
+- 345 tests, 100% coverage
 
 ## Performance Notes
 

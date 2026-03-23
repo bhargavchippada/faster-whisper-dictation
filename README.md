@@ -6,6 +6,8 @@
 
 Real-time speech-to-text dictation powered by [faster-whisper](https://github.com/SYSTRAN/faster-whisper). Speak and watch text appear instantly in any application — fully offline, no cloud APIs, no data leaves your machine.
 
+![Demo: server mode with hold-to-talk](https://raw.githubusercontent.com/bhargavchippada/faster-whisper-dictation/main/assets/demo-server.gif)
+
 ## How it works
 
 ```
@@ -13,7 +15,7 @@ Microphone ──▶ Silero VAD ──▶ Whisper Server ──▶ Type into foc
 (sounddevice)  (local)        (REST API)         (platform-native)
 ```
 
-Audio is captured from your microphone, speech boundaries are detected locally using [Silero VAD](https://github.com/snakers4/silero-vad), each utterance is sent to a Whisper server for transcription, and the result is typed into whatever application has focus — in real-time, as you speak.
+Audio is captured from your microphone, speech boundaries are detected locally using [Silero VAD](https://github.com/snakers4/silero-vad), each complete utterance is sent to a Whisper server for transcription, and the result is typed into whatever application has focus.
 
 ## Why local Whisper?
 
@@ -32,15 +34,17 @@ Recent live benchmarks on the current build showed the daemon averaging `0.00%` 
 
 ## Features
 
-- **Real-time streaming** — text appears as you speak, not after you stop
+- **Batch transcription** — speak a full utterance, release the hotkey, and the complete text is typed at once (default, most accurate)
 - **Hold-to-talk** — hold the hotkey to dictate, release to stop
 - **Toggle mode** — press hotkey to start, press again to stop
 - **Configurable hotkey** — default `Alt+V`, fully customizable
+- **Background daemon** — `start -b` detaches from terminal, logs to file
 - **Cross-platform** — Linux (X11 + Wayland), macOS, Windows
 - **Flexible backend** — works with any OpenAI-compatible STT server (local Docker, remote, Groq, etc.)
 - **Local engine fallback** — optional built-in faster-whisper engine, no server needed
 - **Fully offline** — all processing happens on your machine
 - **Privacy-first** — no cloud, no accounts, no telemetry
+- **Streaming mode** *(experimental)* — `--streaming` sends partial audio for real-time text, but quality is lower than batch mode
 
 ## Install
 
@@ -154,7 +158,7 @@ faster-whisper-dictation start --server-url http://my-server:10300
 # Use local engine instead of server
 faster-whisper-dictation start --engine local
 
-# Enable real-time streaming (text appears as you speak)
+# Experimental: real-time streaming (lower accuracy, WIP)
 faster-whisper-dictation start --streaming
 
 # Run as a background daemon (Unix only, no need for &)
