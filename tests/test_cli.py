@@ -236,14 +236,79 @@ class TestCmdStop:
         state_file = tmp_path / "state.json"
         pid_file.write_text(str(os.getpid()))
 
+        # First call: SIGTERM, second call: os.kill(pid, 0) → ProcessLookupError (exited)
+        kill_calls = [None, ProcessLookupError]
+
+        def mock_kill_side_effect(pid, sig):
+            effect = kill_calls.pop(0)
+            if effect is not None:
+                raise effect
+
         with (
             patch("whisper_dictation.cli.PID_FILE", pid_file),
             patch("whisper_dictation.cli.STATE_FILE", state_file),
             patch("whisper_dictation.cli._read_pid", return_value=os.getpid()),
-            patch("os.kill") as mock_kill,
+            patch("os.kill", side_effect=mock_kill_side_effect) as mock_kill,
+            patch("time.sleep"),
         ):
             cmd_stop(MagicMock())
-            mock_kill.assert_called_once_with(os.getpid(), signal.SIGTERM)
+            # First call is SIGTERM, second is liveness check
+            assert mock_kill.call_args_list[0] == ((os.getpid(), signal.SIGTERM),)
+            assert mock_kill.call_args_list[1] == ((os.getpid(), 0),)
+
+    def test_stop_waits_then_sigkill(self, tmp_path, capsys):
+        """Process doesn't exit after SIGTERM — falls back to SIGKILL."""
+        pid_file = tmp_path / "daemon.pid"
+        state_file = tmp_path / "state.json"
+
+        call_count = [0]
+
+        def mock_kill_side_effect(pid, sig):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return  # SIGTERM succeeds
+            if sig == signal.SIGKILL:
+                return  # SIGKILL succeeds
+            # All liveness checks (sig=0) succeed — process won't die
+            return
+
+        with (
+            patch("whisper_dictation.cli.PID_FILE", pid_file),
+            patch("whisper_dictation.cli.STATE_FILE", state_file),
+            patch("whisper_dictation.cli._read_pid", return_value=99999),
+            patch("os.kill", side_effect=mock_kill_side_effect),
+            patch("time.sleep"),
+        ):
+            cmd_stop(MagicMock())
+        captured = capsys.readouterr()
+        assert "Stopped" in captured.out
+
+    def test_stop_sigkill_race_process_already_dead(self, tmp_path, capsys):
+        """Process dies between last liveness check and SIGKILL."""
+        pid_file = tmp_path / "daemon.pid"
+        state_file = tmp_path / "state.json"
+
+        call_count = [0]
+
+        def mock_kill_side_effect(pid, sig):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return  # SIGTERM succeeds
+            if sig == signal.SIGKILL:
+                raise ProcessLookupError  # died just before SIGKILL
+            # All liveness checks (sig=0) succeed — process appears alive
+            return
+
+        with (
+            patch("whisper_dictation.cli.PID_FILE", pid_file),
+            patch("whisper_dictation.cli.STATE_FILE", state_file),
+            patch("whisper_dictation.cli._read_pid", return_value=99999),
+            patch("os.kill", side_effect=mock_kill_side_effect),
+            patch("time.sleep"),
+        ):
+            cmd_stop(MagicMock())
+        captured = capsys.readouterr()
+        assert "Stopped" in captured.out
 
     def test_stop_dead_process(self, tmp_path, capsys):
         pid_file = tmp_path / "daemon.pid"
@@ -573,11 +638,11 @@ class TestCmdStart:
         assert signal.SIGTERM in registered_handlers
         handler = registered_handlers[signal.SIGTERM]
 
-        # Call the handler and verify it calls daemon.stop and sys.exit
+        # Call the handler and verify it calls daemon.stop and os._exit
         mock_daemon.reset_mock()
-        with pytest.raises(SystemExit) as exc_info:
+        with patch("os._exit") as mock_exit:
             handler(signal.SIGTERM, None)
-        assert exc_info.value.code == 0
+        mock_exit.assert_called_once_with(0)
         mock_daemon.stop.assert_called_once()
 
 

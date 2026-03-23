@@ -160,7 +160,8 @@ def cmd_start(args: argparse.Namespace) -> None:
 
     def _shutdown(sig: int, frame: object) -> None:
         daemon.stop()
-        sys.exit(0)
+        _cleanup_pid()
+        os._exit(0)
 
     signal.signal(signal.SIGTERM, _shutdown)
     signal.signal(signal.SIGINT, _shutdown)
@@ -177,6 +178,8 @@ def cmd_start(args: argparse.Namespace) -> None:
 
 def cmd_stop(args: argparse.Namespace) -> None:
     """Stop the running dictation daemon."""
+    import time
+
     pid = _read_pid()
     if pid is None:
         print("No daemon running.")
@@ -184,11 +187,28 @@ def cmd_stop(args: argparse.Namespace) -> None:
 
     try:
         os.kill(pid, signal.SIGTERM)
-        print(f"Stopped daemon (PID {pid})")
     except ProcessLookupError:
         print("Daemon process not found, cleaning up.")
-    finally:
         _cleanup_pid()
+        return
+
+    # Wait up to 5s for the process to exit
+    for _ in range(50):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        # Still alive after 5s — force kill
+        try:
+            os.kill(pid, signal.SIGKILL)
+            log.warning("Daemon did not exit gracefully, sent SIGKILL")
+        except ProcessLookupError:
+            pass
+
+    print(f"Stopped daemon (PID {pid})")
+    _cleanup_pid()
 
 
 def cmd_status(args: argparse.Namespace) -> None:
