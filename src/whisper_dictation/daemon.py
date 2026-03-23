@@ -63,9 +63,10 @@ class DictationDaemon:
         if not self._recording:
             return
 
-        if self._use_ws and self._ws_engine is not None:
+        ws_engine = self._ws_engine  # snapshot to avoid race with deactivate
+        if self._use_ws and ws_engine is not None:
             try:
-                self._ws_engine.send_audio(audio)
+                ws_engine.send_audio(audio)
             except Exception:
                 log.error("WS audio send failed", exc_info=True)
         elif self.streaming:
@@ -107,7 +108,7 @@ class DictationDaemon:
             log.error("Transcription or typing failed", exc_info=True)
 
     def _transcribe_batch_ws(self, audio: np.ndarray) -> None:
-        """Transcribe via WebSocket batch mode and type the result."""
+        """Transcribe via WebSocket batch mode, fall back to REST on failure."""
         try:
             ws_cfg = self.config.websocket
             ws = WebSocketEngine(
@@ -125,7 +126,8 @@ class DictationDaemon:
                 log.info("No speech detected (WS batch)")
                 notify("No speech", "Nothing was transcribed")
         except Exception:
-            log.error("WS batch transcription failed", exc_info=True)
+            log.warning("WS batch failed, falling back to REST", exc_info=True)
+            self._transcribe_and_type(audio)
 
     def _on_activate(self) -> None:
         """Hotkey pressed — start recording."""

@@ -6,12 +6,11 @@ from typing import TYPE_CHECKING
 
 from .base import TranscriptionEngine
 from .server import ServerEngine
-from .websocket import WebSocketEngine
 
 if TYPE_CHECKING:
     from ..config import Config
 
-__all__ = ["ServerEngine", "TranscriptionEngine", "WebSocketEngine", "create_engine"]
+__all__ = ["ServerEngine", "TranscriptionEngine", "create_engine"]
 
 
 def create_engine(config: Config) -> TranscriptionEngine:

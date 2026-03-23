@@ -429,7 +429,10 @@ def cmd_transcribe(args: argparse.Namespace) -> None:
                 reconnect_attempts=ws_cfg.reconnect_attempts,
                 reconnect_delay=ws_cfg.reconnect_delay,
             )
-            return ws.transcribe_batch(audio, sr)
+            try:
+                return ws.transcribe_batch(audio, sr)
+            finally:
+                ws.close()
         return engine.transcribe(audio, sr)
 
     engine = create_engine(config)

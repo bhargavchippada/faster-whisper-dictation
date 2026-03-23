@@ -586,7 +586,7 @@ class TestWebSocketStreaming:
     @patch("whisper_dictation.daemon.AudioStream")
     @patch("whisper_dictation.daemon.create_engine")
     def test_ws_activate_connect_failure(self, mock_create, mock_audio_cls, mock_notify):
-        """WS streaming: failed connect resets recording state."""
+        """WS streaming: failed connect resets recording state and notifies."""
         mock_create.return_value = MagicMock()
         mock_audio_cls.return_value = MagicMock()
         daemon = DictationDaemon(Config(), streaming=True)
@@ -598,6 +598,7 @@ class TestWebSocketStreaming:
             daemon._on_activate()
             assert daemon._recording is False
             assert daemon._ws_engine is None
+            mock_notify.assert_any_call("Error", "WebSocket connection failed")
 
     @patch("whisper_dictation.daemon.create_engine")
     def test_ws_audio_chunk_sends_to_ws(self, mock_create):
@@ -733,3 +734,59 @@ class TestWebSocketStreaming:
         mock_create.return_value = MagicMock()
         daemon = DictationDaemon(Config(), streaming=False)
         assert daemon._use_ws is False
+
+
+# ---------------------------------------------------------------------------
+# _transcribe_batch_ws
+# ---------------------------------------------------------------------------
+
+
+class TestTranscribeBatchWs:
+    @patch("whisper_dictation.daemon.type_text")
+    @patch("whisper_dictation.daemon.WebSocketEngine")
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_types_transcribed_text(self, mock_create, mock_ws_cls, mock_type):
+        """WS batch: successful transcription types text."""
+        mock_create.return_value = MagicMock()
+        mock_ws = MagicMock()
+        mock_ws.transcribe_batch.return_value = "hello world"
+        mock_ws_cls.return_value = mock_ws
+
+        daemon = DictationDaemon(Config())
+        daemon._transcribe_batch_ws(np.zeros(16000, dtype=np.float32))
+
+        mock_type.assert_called_once_with("hello world ")
+
+    @patch("whisper_dictation.daemon.notify")
+    @patch("whisper_dictation.daemon.type_text")
+    @patch("whisper_dictation.daemon.WebSocketEngine")
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_empty_result_notifies(self, mock_create, mock_ws_cls, mock_type, mock_notify):
+        """WS batch: empty result notifies 'No speech'."""
+        mock_create.return_value = MagicMock()
+        mock_ws = MagicMock()
+        mock_ws.transcribe_batch.return_value = ""
+        mock_ws_cls.return_value = mock_ws
+
+        daemon = DictationDaemon(Config())
+        daemon._transcribe_batch_ws(np.zeros(16000, dtype=np.float32))
+
+        mock_type.assert_not_called()
+        mock_notify.assert_any_call("No speech", "Nothing was transcribed")
+
+    @patch("whisper_dictation.daemon.type_text")
+    @patch("whisper_dictation.daemon.WebSocketEngine")
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_exception_falls_back_to_rest(self, mock_create, mock_ws_cls, mock_type):
+        """WS batch: exception falls back to REST _transcribe_and_type."""
+        mock_engine = MagicMock()
+        mock_engine.transcribe.return_value = "fallback text"
+        mock_create.return_value = mock_engine
+        mock_ws_cls.return_value = MagicMock(
+            transcribe_batch=MagicMock(side_effect=ConnectionRefusedError("fail")),
+        )
+
+        daemon = DictationDaemon(Config())
+        daemon._transcribe_batch_ws(np.zeros(16000, dtype=np.float32))
+
+        mock_type.assert_called_once_with("fallback text ")

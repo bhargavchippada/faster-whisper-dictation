@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 
 from whisper_dictation.engine.websocket import (
+    _END_SENTINEL,
     WebSocketEngine,
     _audio_to_float32_bytes,
     _build_config_message,
@@ -32,6 +33,10 @@ class TestHttpToWsUrl:
     def test_preserves_path(self):
         assert _http_to_ws_url("http://host:8080/api") == "ws://host:8080/api"
 
+    def test_rejects_non_http_scheme(self):
+        with pytest.raises(ValueError, match="must use http or https"):
+            _http_to_ws_url("ftp://host:21")
+
 
 class TestIsLoopback:
     def test_localhost(self):
@@ -42,6 +47,14 @@ class TestIsLoopback:
 
     def test_remote_host(self):
         assert _is_loopback("http://whisper.example.com") is False
+
+    def test_ipv4_loopback_range(self):
+        """127.x.x.x addresses are all loopback."""
+        assert _is_loopback("http://127.0.0.2:9090") is True
+        assert _is_loopback("http://127.255.255.255:9090") is True
+
+    def test_ipv6_loopback(self):
+        assert _is_loopback("http://[::1]:9090") is True
 
     def test_empty_host(self):
         assert _is_loopback("http://") is True
@@ -226,7 +239,7 @@ class TestFlush:
         )
         engine._connected.set()
         engine.flush()
-        assert engine._send_queue.get_nowait() == b"__END__"
+        assert engine._send_queue.get_nowait() is _END_SENTINEL
 
     def test_noop_when_disconnected(self):
         engine = WebSocketEngine(
@@ -534,7 +547,7 @@ class TestSenderLoop:
             language="en", on_text=MagicMock(),
         )
         engine._ws = mock_ws
-        engine._send_queue.put(b"__END__")
+        engine._send_queue.put(_END_SENTINEL)
         engine._send_queue.put(None)
         engine._sender_loop()
         mock_ws.send.assert_called_once_with("END_OF_AUDIO")
@@ -682,3 +695,110 @@ class TestReceiverLoop:
         mock_ws.recv.side_effect = [msg_good, msg_good2, RuntimeError("closed")]
         engine._receiver_loop()
         on_text.assert_called_once_with("ok")
+
+    def test_skips_oversized_message(self):
+        """Messages exceeding _MAX_MESSAGE_BYTES are skipped."""
+        mock_ws = MagicMock()
+        huge = "x" * (2 * 1024 * 1024)  # 2MB
+        mock_ws.recv.side_effect = [huge, RuntimeError("closed")]
+        engine = WebSocketEngine(
+            server_url="http://localhost:9090", model="tiny",
+            language="en", on_text=MagicMock(),
+        )
+        engine._ws = mock_ws
+        engine._receiver_loop()  # should not crash
+
+
+# ---------------------------------------------------------------------------
+# transcribe_batch
+# ---------------------------------------------------------------------------
+
+
+class TestTranscribeBatch:
+    def test_returns_transcribed_text(self):
+        """Batch mode: connect, send audio, collect segments, return text."""
+        engine = WebSocketEngine(
+            server_url="http://localhost:9090", model="tiny",
+            language="en",
+        )
+
+        def fake_connect():
+            engine._connected.set()
+
+        with patch.object(engine, "connect", side_effect=fake_connect):
+            with patch.object(engine, "flush") as mock_flush:
+                def on_flush():
+                    with engine._seg_lock:
+                        if engine._batch_collected is not None:
+                            engine._batch_collected.append("hello world")
+                    engine._flush_done.set()
+                mock_flush.side_effect = on_flush
+
+                with patch.object(engine, "close"):
+                    result = engine.transcribe_batch(
+                        np.zeros(1024, dtype=np.float32), sample_rate=16000,
+                    )
+
+        assert result == "hello world"
+
+    def test_returns_empty_on_timeout(self):
+        """Batch mode: timeout returns whatever was collected."""
+        engine = WebSocketEngine(
+            server_url="http://localhost:9090", model="tiny",
+            language="en",
+        )
+
+        with patch.object(engine, "connect"):
+            engine._connected.set()
+            with patch.object(engine, "flush"):
+                with patch.object(engine, "wait_for_completion", return_value=False):
+                    with patch.object(engine, "close"):
+                        with engine._seg_lock:
+                            engine._batch_collected = []
+                        result = engine.transcribe_batch(
+                            np.zeros(512, dtype=np.float32),
+                        )
+
+        assert result == ""
+
+    def test_returns_empty_on_exception(self):
+        """Batch mode: exception returns empty string."""
+        engine = WebSocketEngine(
+            server_url="http://localhost:9090", model="tiny",
+            language="en",
+        )
+        with patch.object(engine, "connect", side_effect=ConnectionRefusedError):
+            result = engine.transcribe_batch(np.zeros(512, dtype=np.float32))
+        assert result == ""
+
+    def test_restores_use_vad(self):
+        """Batch mode: _use_vad is restored even on exception."""
+        engine = WebSocketEngine(
+            server_url="http://localhost:9090", model="tiny",
+            language="en", use_vad=True,
+        )
+        with patch.object(engine, "connect", side_effect=RuntimeError("fail")):
+            engine.transcribe_batch(np.zeros(512, dtype=np.float32))
+        assert engine._use_vad is True
+
+    def test_batch_collected_in_process_segments(self):
+        """_process_segments appends to _batch_collected in batch mode."""
+        engine = WebSocketEngine(
+            server_url="http://localhost:9090", model="tiny",
+            language="en",
+        )
+        with engine._seg_lock:
+            engine._batch_collected = []
+        engine._process_segments([{"text": "hello", "completed": True}])
+        assert engine._batch_collected == ["hello"]
+
+    def test_flush_resets_emitted_count(self):
+        """flush() resets _emitted_count so post-flush segments re-emit."""
+        engine = WebSocketEngine(
+            server_url="http://localhost:9090", model="tiny",
+            language="en", on_text=MagicMock(),
+        )
+        engine._connected.set()
+        engine._emitted_count = 5
+        engine.flush()
+        assert engine._emitted_count == 0

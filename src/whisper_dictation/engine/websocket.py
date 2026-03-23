@@ -157,8 +157,9 @@ class WebSocketEngine:
         self._connected.clear()
         self._server_ready.clear()
         self._flush_done.clear()
-        self._emitted_count = 0
-        self._batch_collected = None
+        with self._seg_lock:
+            self._emitted_count = 0
+            self._batch_collected = None
         self._uid = str(uuid.uuid4())
 
         if not _is_loopback(self._server_url) and self.ws_url.startswith("ws://"):
@@ -173,7 +174,7 @@ class WebSocketEngine:
 
         for attempt in range(attempts):
             try:
-                self._ws = ws_sync.connect(self.ws_url)
+                self._ws = ws_sync.connect(self.ws_url, max_size=_MAX_MESSAGE_BYTES)
                 break
             except Exception as e:
                 last_error = e
@@ -188,16 +189,18 @@ class WebSocketEngine:
             log.error("WebSocket connection failed after %d attempts: %s", attempts, self.ws_url)
             raise last_error  # type: ignore[misc]
 
+        # Start threads BEFORE sending config so the receiver is ready
+        # to catch SERVER_READY immediately.
+        self._receiver_thread = threading.Thread(target=self._receiver_loop, daemon=True)
+        self._receiver_thread.start()
+        self._sender_thread = threading.Thread(target=self._sender_loop, daemon=True)
+        self._sender_thread.start()
+
         config_msg = _build_config_message(
             uid=self._uid, language=self._language,
             model=self._model, use_vad=self._use_vad,
         )
         self._ws.send(json.dumps(config_msg))
-
-        self._receiver_thread = threading.Thread(target=self._receiver_loop, daemon=True)
-        self._receiver_thread.start()
-        self._sender_thread = threading.Thread(target=self._sender_loop, daemon=True)
-        self._sender_thread.start()
 
         if not self._server_ready.wait(timeout=10.0):
             log.warning("WhisperLive did not send SERVER_READY within 10s, proceeding anyway")
@@ -219,7 +222,8 @@ class WebSocketEngine:
         if not self._connected.is_set():
             return
         self._flush_done.clear()
-        self._emitted_count = 0  # reset for post-flush segment processing
+        with self._seg_lock:
+            self._emitted_count = 0  # reset for post-flush segment processing
         try:
             self._send_queue.put_nowait(_END_SENTINEL)
         except queue.Full:
@@ -238,10 +242,12 @@ class WebSocketEngine:
         """
         saved_vad = self._use_vad
         self._use_vad = False
-        self._batch_collected = []
 
         try:
             self.connect()
+            # Set AFTER connect() which resets _batch_collected to None
+            with self._seg_lock:
+                self._batch_collected = []
 
             # Send audio in chunks
             for i in range(0, len(audio), _BATCH_CHUNK_SAMPLES):
@@ -256,24 +262,36 @@ class WebSocketEngine:
                 log.warning("Batch transcription timed out after %.0fs", timeout)
 
             self.close()
-            return " ".join(self._batch_collected).strip()
+            with self._seg_lock:
+                collected = list(self._batch_collected or [])
+            return " ".join(collected).strip()
         except Exception:
             log.error("Batch WS transcription failed", exc_info=True)
             self.close()
             return ""
         finally:
             self._use_vad = saved_vad
-            self._batch_collected = None
+            with self._seg_lock:
+                self._batch_collected = None
 
     def close(self) -> None:
         """Close WebSocket connection and stop threads."""
         self._stop_event.set()
         self._connected.clear()
 
+        # Send None sentinel to unblock the sender thread
         try:
             self._send_queue.put_nowait(None)
         except queue.Full:
             pass
+
+        # Join threads BEFORE closing socket so sender can finish
+        # any pending END_OF_AUDIO frame.
+        if self._sender_thread is not None:
+            self._sender_thread.join(timeout=2.0)
+            if self._sender_thread.is_alive():
+                log.warning("WebSocket sender thread did not exit within timeout")
+            self._sender_thread = None
 
         ws = self._ws
         self._ws = None
@@ -283,11 +301,6 @@ class WebSocketEngine:
             except Exception:
                 log.debug("WebSocket close error", exc_info=True)
 
-        if self._sender_thread is not None:
-            self._sender_thread.join(timeout=2.0)
-            if self._sender_thread.is_alive():
-                log.warning("WebSocket sender thread did not exit within timeout")
-            self._sender_thread = None
         if self._receiver_thread is not None:
             self._receiver_thread.join(timeout=2.0)
             if self._receiver_thread.is_alive():
@@ -305,9 +318,8 @@ class WebSocketEngine:
     def is_available(self) -> bool:
         """Check if the WhisperLive server is reachable."""
         try:
-            ws = ws_sync.connect(self.ws_url, close_timeout=3, open_timeout=3)
-            ws.close()
-            return True
+            with ws_sync.connect(self.ws_url, close_timeout=3, open_timeout=3):
+                return True
         except Exception:
             return False
 
@@ -327,7 +339,7 @@ class WebSocketEngine:
                 break
 
             try:
-                if data == _END_SENTINEL:
+                if data is _END_SENTINEL:
                     ws.send("END_OF_AUDIO")
                 else:
                     ws.send(data)
@@ -353,6 +365,10 @@ class WebSocketEngine:
 
             if isinstance(raw, bytes):
                 log.debug("WS binary frame ignored (%d bytes)", len(raw))
+                continue
+
+            if isinstance(raw, str) and len(raw) > _MAX_MESSAGE_BYTES:
+                log.warning("WS message too large (%d bytes), skipping", len(raw))
                 continue
 
             try:
@@ -406,18 +422,21 @@ class WebSocketEngine:
             return
 
         completed = [s for s in valid if s.get("completed", False)]
-        new_completed = completed[self._emitted_count:]
+
+        with self._seg_lock:
+            new_completed = completed[self._emitted_count:]
+            self._emitted_count = len(completed)
+            batch = self._batch_collected
 
         for seg in new_completed:
             text = seg.get("text", "").strip()
             if text:
                 log.debug("WS text (final): %s", text[:80])
-                if self._batch_collected is not None:
-                    self._batch_collected.append(text)
+                if batch is not None:
+                    if len(batch) < _MAX_BATCH_SEGMENTS:
+                        batch.append(text)
                 else:
                     self._on_text(text)
-
-        self._emitted_count = len(completed)
 
         last_seg = valid[-1]
         if last_seg.get("completed", False):

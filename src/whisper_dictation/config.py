@@ -227,7 +227,8 @@ def validate(config: Config) -> None:
     if ws.reconnect_attempts < 0:
         errors.append(f"websocket.reconnect_attempts must be >= 0, got {ws.reconnect_attempts}")
     if not (0.0 < ws.reconnect_delay <= 30.0):
-        errors.append(f"websocket.reconnect_delay must be 0.0-30.0, got {ws.reconnect_delay}")
+        delay = ws.reconnect_delay
+        errors.append(f"websocket.reconnect_delay must be >0.0 and <=30.0, got {delay}")
 
     if errors:
         raise ValueError("Invalid configuration:\n  - " + "\n  - ".join(errors))
