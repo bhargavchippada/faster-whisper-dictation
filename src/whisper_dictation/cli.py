@@ -250,7 +250,7 @@ mode = "toggle"                       # "toggle" (press to start/stop) or "hold"
 
 [vad]
 threshold = 0.5                       # Speech detection sensitivity (0.0-1.0)
-silence_ms = 800                      # Wait after speech stops before transcribing (ms)
+silence_ms = 200                      # Wait after speech stops before transcribing (ms)
 min_speech_ms = 250                   # Ignore utterances shorter than this (ms)
 max_speech_s = 90.0                   # Maximum single utterance length (seconds)
 

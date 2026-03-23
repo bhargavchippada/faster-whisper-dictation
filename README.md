@@ -197,7 +197,7 @@ mode = "toggle"         # "toggle" or "hold"
 
 [vad]
 threshold = 0.5         # Silero VAD confidence threshold (0.0-1.0)
-silence_ms = 800        # silence duration to end an utterance
+silence_ms = 200        # silence duration to end an utterance
 min_speech_ms = 250     # minimum speech duration to accept
 max_speech_s = 90.0     # max single utterance duration (seconds)
 

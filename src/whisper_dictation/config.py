@@ -43,7 +43,7 @@ class HotkeyConfig:
 @dataclass(frozen=True)
 class VADConfig:
     threshold: float = 0.5
-    silence_ms: int = 800
+    silence_ms: int = 200
     min_speech_ms: int = 250
     max_speech_s: float = 90.0
 

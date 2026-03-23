@@ -18,7 +18,8 @@ log = logging.getLogger(__name__)
 # path, which causes select() to return immediately → 100% CPU.
 # Default 10ms (~100 Hz poll, imperceptible).  Configurable via env var.
 _MIN_THROTTLE_MS = 10
-_raw_throttle = os.environ.get("DICTATION_HOTKEY_POLL_MS", str(_MIN_THROTTLE_MS))
+_DEFAULT_THROTTLE_MS = 100  # ~10 Hz poll, <1% CPU, sub-100ms latency
+_raw_throttle = os.environ.get("DICTATION_HOTKEY_POLL_MS", str(_DEFAULT_THROTTLE_MS))
 try:
     _PYNPUT_POLL_MS = max(_MIN_THROTTLE_MS, int(_raw_throttle))
 except ValueError:
@@ -40,30 +41,34 @@ def _throttle_pynput_xrecord() -> None:
     Safe no-op on non-X11 platforms where Xlib is not available.
     """
     try:
-        from Xlib.protocol.display import Display
+        import select as _select_mod
 
-        original = Display.send_and_recv
+        import Xlib.protocol.display  # noqa: F401 — ensure Xlib is available
 
-        _call_count = [0]
+        _original_select = _select_mod.select
 
-        def throttled_send_and_recv(self, flush=False, event=False, request=None, recv=False):
-            import time
+        def _throttled_select(rlist, wlist, xlist, timeout=None):
+            """Rate-limit select calls to prevent busy-loop.
 
-            _call_count[0] += 1
-            if _call_count[0] <= 3:
-                log.debug("throttled_send_and_recv called #%d (request=%s recv=%s flush=%s)", _call_count[0], request, recv, flush)
-            time.sleep(_PYNPUT_SELECT_THROTTLE_S)
-            return original(self, flush=flush, event=event, request=request, recv=recv)
+            XRecord generates a constant event stream on the X socket,
+            so select always returns immediately (data always available).
+            We sleep AFTER select returns to cap the loop at ~10 Hz.
+            """
+            import time as _time
 
-        Display.send_and_recv = throttled_send_and_recv
+            result = _original_select(rlist, wlist, xlist, timeout)
+            _time.sleep(_PYNPUT_SELECT_THROTTLE_S)
+            return result
+
+        _select_mod.select = _throttled_select
         log.debug(
-            "Throttled Xlib XRecord polling to %.0fms",
+            "Throttled select.select polling to %.0fms",
             _PYNPUT_SELECT_THROTTLE_S * 1000,
         )
     except ImportError:
         pass  # not on X11, no Xlib
     except Exception:
-        log.debug("Could not throttle Xlib XRecord", exc_info=True)
+        log.debug("Could not throttle select", exc_info=True)
 
 
 def _parse_hotkey(binding: str) -> tuple[set[str], str]:
@@ -76,6 +81,11 @@ def _parse_hotkey(binding: str) -> tuple[set[str], str]:
     key = parts[-1]
     modifiers = set(parts[:-1])
     return modifiers, key
+
+
+# Apply the Xlib throttle at import time — must happen before any
+# pynput Listener is created so the patched select is used from the start.
+_throttle_pynput_xrecord()
 
 
 class HotkeyListener:
@@ -229,7 +239,6 @@ class HotkeyListener:
                         return
                     self._handle_release()
 
-        _throttle_pynput_xrecord()  # must patch Xlib BEFORE listener.start()
         self._listener = keyboard.Listener(on_press=on_press, on_release=on_release)
         self._listener.daemon = True
         self._listener.start()

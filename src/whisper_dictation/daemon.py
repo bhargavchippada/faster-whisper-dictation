@@ -40,6 +40,7 @@ class DictationDaemon:
         self._audio: AudioStream | None = None
         self._hotkey: HotkeyListener | None = None
         self._running = threading.Event()
+        self._stop_event = threading.Event()
         self._recording = False
         self._recorded_chunks: list[np.ndarray] = []
         self._lock = threading.Lock()
@@ -185,6 +186,7 @@ class DictationDaemon:
     def stop(self) -> None:
         """Stop the dictation daemon."""
         self._running.clear()
+        self._stop_event.set()
 
         with self._lock:
             should_deactivate = self._recording
@@ -204,9 +206,9 @@ class DictationDaemon:
         """Block until the daemon is stopped."""
         try:
             self._running.wait()
-            # Keep main thread alive while running
+            # Keep main thread alive — _stop_event blocks until stop() is called
             while self._running.is_set():
-                self._running.wait(timeout=1.0)
+                self._stop_event.wait(timeout=1.0)
         except KeyboardInterrupt:
             log.info("Interrupted")
             self.stop()

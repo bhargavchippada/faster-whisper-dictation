@@ -41,7 +41,7 @@ class TestDefaults:
     def test_vad_defaults(self):
         cfg = VADConfig()
         assert cfg.threshold == 0.5
-        assert cfg.silence_ms == 800
+        assert cfg.silence_ms == 200
         assert cfg.min_speech_ms == 250
 
     def test_audio_defaults(self):
