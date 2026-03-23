@@ -197,21 +197,24 @@ class DictationDaemon:
             self._hotkey.stop()
             self._hotkey = None
 
-        self._transcribe_pool.shutdown(wait=False)
+        self._transcribe_pool.shutdown(wait=True, cancel_futures=True)
         self._engine.close()
         log.info("Dictation daemon stopped")
         notify("Dictation Stopped", "Daemon exited")
 
+    def request_stop(self) -> None:
+        """Signal the daemon to stop. Safe to call from a signal handler."""
+        self._stop_event.set()
+
     def wait(self) -> None:
-        """Block until the daemon is stopped."""
+        """Block until the daemon is stopped or a stop is requested."""
         try:
             self._running.wait()
-            # Keep main thread alive — _stop_event blocks until stop() is called
             while self._running.is_set():
-                self._stop_event.wait(timeout=1.0)
+                if self._stop_event.wait(timeout=1.0):
+                    break
         except KeyboardInterrupt:
             log.info("Interrupted")
-            self.stop()
 
     @property
     def is_running(self) -> bool:

@@ -159,9 +159,8 @@ def cmd_start(args: argparse.Namespace) -> None:
     daemon = DictationDaemon(config, streaming=streaming)
 
     def _shutdown(sig: int, frame: object) -> None:
-        daemon.stop()
-        _cleanup_pid()
-        os._exit(0)
+        # Signal-safe: only set the event, actual cleanup in main thread
+        daemon.request_stop()
 
     signal.signal(signal.SIGTERM, _shutdown)
     signal.signal(signal.SIGINT, _shutdown)
@@ -173,6 +172,7 @@ def cmd_start(args: argparse.Namespace) -> None:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
     finally:
+        daemon.stop()
         _cleanup_pid()
 
 

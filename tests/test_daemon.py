@@ -509,7 +509,7 @@ class TestWait:
     @patch("whisper_dictation.daemon.notify")
     @patch("whisper_dictation.daemon.create_engine")
     def test_wait_keyboard_interrupt(self, mock_create, mock_notify):
-        """Test wait() handles KeyboardInterrupt by calling stop()."""
+        """Test wait() handles KeyboardInterrupt gracefully (returns to caller)."""
         mock_engine = MagicMock()
         mock_create.return_value = mock_engine
 
@@ -517,6 +517,5 @@ class TestWait:
         daemon._running.set()
 
         with patch.object(daemon._running, "wait", side_effect=KeyboardInterrupt):
-            with patch.object(daemon, "stop") as mock_stop:
-                daemon.wait()
-                mock_stop.assert_called_once()
+            # wait() should return without raising — caller (cmd_start) handles cleanup
+            daemon.wait()

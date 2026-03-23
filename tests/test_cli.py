@@ -638,12 +638,10 @@ class TestCmdStart:
         assert signal.SIGTERM in registered_handlers
         handler = registered_handlers[signal.SIGTERM]
 
-        # Call the handler and verify it calls daemon.stop and os._exit
+        # Call the handler — should call request_stop() (signal-safe)
         mock_daemon.reset_mock()
-        with patch("os._exit") as mock_exit:
-            handler(signal.SIGTERM, None)
-        mock_exit.assert_called_once_with(0)
-        mock_daemon.stop.assert_called_once()
+        handler(signal.SIGTERM, None)
+        mock_daemon.request_stop.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

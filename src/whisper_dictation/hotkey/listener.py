@@ -9,66 +9,57 @@ import logging
 import os
 import sys
 import threading
+import time
 from collections.abc import Callable
 
 log = logging.getLogger(__name__)
 
-# Minimum select() timeout to prevent pynput's XRecord backend from
-# busy-looping on X11.  python-xlib uses timeout=0 in its recv/flush
-# path, which causes select() to return immediately → 100% CPU.
-# Default 10ms (~100 Hz poll, imperceptible).  Configurable via env var.
-_MIN_THROTTLE_MS = 10
-_DEFAULT_THROTTLE_MS = 100  # ~10 Hz poll, <1% CPU, sub-100ms latency
-_raw_throttle = os.environ.get("DICTATION_HOTKEY_POLL_MS", str(_DEFAULT_THROTTLE_MS))
-try:
-    _PYNPUT_POLL_MS = max(_MIN_THROTTLE_MS, int(_raw_throttle))
-except ValueError:
-    _PYNPUT_POLL_MS = _MIN_THROTTLE_MS
+_DEFAULT_THROTTLE_MS = 30
+
+
+def _parse_poll_ms(value: str) -> int:
+    try:
+        return max(10, int(value))
+    except ValueError:
+        return _DEFAULT_THROTTLE_MS
+
+
+_PYNPUT_POLL_MS = _parse_poll_ms(os.environ.get("DICTATION_HOTKEY_POLL_MS", "30"))
 _PYNPUT_SELECT_THROTTLE_S = _PYNPUT_POLL_MS / 1000.0
+_throttle_applied = False
 
 
 def _throttle_pynput_xrecord() -> None:
-    """Patch python-xlib's Display class to avoid 100% CPU idle spin.
+    """Patch Xlib Display.send_and_recv to prevent pynput CPU busy-loop."""
+    global _throttle_applied
 
-    pynput's XRecord backend (python-xlib) calls select() with timeout=0
-    in its recv/flush path, burning CPU even when no keys are pressed.
-    This patches Display.send_and_recv at the class level to enforce a
-    minimum select timeout, reducing idle CPU from ~100% to ~0%.
+    if _throttle_applied:
+        return
 
-    Must be called BEFORE pynput creates its Display instances (i.e.,
-    before keyboard.Listener.start()).
-
-    Safe no-op on non-X11 platforms where Xlib is not available.
-    """
     try:
-        import select as _select_mod
-
-        import Xlib.protocol.display  # noqa: F401 — ensure Xlib is available
-
-        _original_select = _select_mod.select
-
-        def _throttled_select(rlist, wlist, xlist, timeout=None):
-            """Rate-limit select calls to prevent busy-loop.
-
-            XRecord generates a constant event stream on the X socket,
-            so select always returns immediately (data always available).
-            We sleep AFTER select returns to cap the loop at ~10 Hz.
-            """
-            import time as _time
-
-            result = _original_select(rlist, wlist, xlist, timeout)
-            _time.sleep(_PYNPUT_SELECT_THROTTLE_S)
-            return result
-
-        _select_mod.select = _throttled_select
-        log.debug(
-            "Throttled select.select polling to %.0fms",
-            _PYNPUT_SELECT_THROTTLE_S * 1000,
-        )
+        from Xlib.protocol.display import Display
     except ImportError:
-        pass  # not on X11, no Xlib
+        return
     except Exception:
-        log.debug("Could not throttle select", exc_info=True)
+        log.debug("Could not import Xlib for throttling", exc_info=True)
+        return
+
+    original = Display.send_and_recv
+    warmup_calls = 20
+    call_count = 0
+
+    def throttled(self, *args, **kwargs):
+        nonlocal call_count
+        result = original(self, *args, **kwargs)
+        call_count += 1
+        if call_count > warmup_calls:
+            time.sleep(_PYNPUT_SELECT_THROTTLE_S)
+        return result
+
+    throttled._throttled = True  # type: ignore[attr-defined]
+    Display.send_and_recv = throttled
+    _throttle_applied = True
+    log.debug("Throttled Xlib send_and_recv to %dms", _PYNPUT_POLL_MS)
 
 
 def _parse_hotkey(binding: str) -> tuple[set[str], str]:
@@ -81,11 +72,6 @@ def _parse_hotkey(binding: str) -> tuple[set[str], str]:
     key = parts[-1]
     modifiers = set(parts[:-1])
     return modifiers, key
-
-
-# Apply the Xlib throttle at import time — must happen before any
-# pynput Listener is created so the patched select is used from the start.
-_throttle_pynput_xrecord()
 
 
 class HotkeyListener:
@@ -111,6 +97,7 @@ class HotkeyListener:
         self._modifiers, self._key = _parse_hotkey(binding)
         self._active = False
         self._listener = None
+        self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._lock = threading.Lock()
         self._last_toggle_time = 0.0
@@ -140,9 +127,10 @@ class HotkeyListener:
                 dev = evdev.InputDevice(devices[0])
                 dev.close()
             except PermissionError:
-                log.info(
-                    "evdev: no permission to read input devices "
-                    "(add user to 'input' group), falling back to pynput"
+                log.warning(
+                    "evdev: no permission to read input devices. "
+                    "Falling back to pynput (may use high CPU). "
+                    "Fix: sudo usermod -aG input $USER && logout"
                 )
                 return False
             return True
@@ -158,6 +146,7 @@ class HotkeyListener:
 
     def start(self) -> None:
         """Start listening for the hotkey in a background thread."""
+        self._stop_event.clear()
         if self._use_evdev():
             self._start_evdev()
         else:
@@ -172,9 +161,15 @@ class HotkeyListener:
             except Exception:
                 log.debug("Error stopping listener", exc_info=True)
             self._listener = None
+        if self._thread is not None:
+            self._thread.join(timeout=1.5)
+            self._thread = None
 
     def _start_pynput(self) -> None:
         """Start hotkey listener using pynput."""
+        if sys.platform == "linux" and os.environ.get("XDG_SESSION_TYPE", "x11") == "x11":
+            _throttle_pynput_xrecord()
+
         from pynput import keyboard
 
         modifier_map = {
@@ -248,6 +243,7 @@ class HotkeyListener:
         """Start hotkey listener using evdev (Linux, works on Wayland)."""
         thread = threading.Thread(target=self._evdev_loop, daemon=True)
         thread.start()
+        self._thread = thread
         log.info("Hotkey listener started (evdev): %s [%s mode]", self.binding, self.mode)
 
     def _evdev_loop(self) -> None:

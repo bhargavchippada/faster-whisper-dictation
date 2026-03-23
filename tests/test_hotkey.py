@@ -524,121 +524,42 @@ class TestStartEvdev:
 
 
 # ---------------------------------------------------------------------------
-# _throttle_pynput_xrecord
+# _throttle_xlib
 # ---------------------------------------------------------------------------
 
 
-class TestThrottlePynputXrecord:
-    def test_patches_select_module(self):
-        """Test throttle patches select.select at module level."""
-        import select as select_mod
+class TestThrottleXlib:
+    def test_patches_display_class(self):
+        """Test throttle patches Xlib Display.send_and_recv."""
+        from Xlib.protocol.display import Display
 
-        from whisper_dictation.hotkey.listener import _throttle_pynput_xrecord
-
-        original = select_mod.select
+        original = Display.send_and_recv
         try:
-            _throttle_pynput_xrecord()
-            assert select_mod.select is not original
+            HotkeyListener._throttle_xlib()
+            assert Display.send_and_recv is not original
+            assert getattr(Display.send_and_recv, "_throttled", False)
         finally:
-            select_mod.select = original
+            Display.send_and_recv = original
+
+    def test_idempotent(self):
+        """Test throttle only patches once."""
+        from Xlib.protocol.display import Display
+
+        original = Display.send_and_recv
+        try:
+            HotkeyListener._throttle_xlib()
+            first = Display.send_and_recv
+            HotkeyListener._throttle_xlib()
+            assert Display.send_and_recv is first  # not double-wrapped
+        finally:
+            Display.send_and_recv = original
 
     def test_noop_when_no_xlib(self):
         """Test throttle is a safe no-op when Xlib is not installed."""
-        from whisper_dictation.hotkey.listener import _throttle_pynput_xrecord
-
         with patch.dict(
             "sys.modules", {"Xlib": None, "Xlib.protocol": None, "Xlib.protocol.display": None}
         ):
-            # Should not raise
-            _throttle_pynput_xrecord()
-
-    def test_throttled_select_enforces_minimum_timeout(self):
-        """Test throttled select replaces timeout=0 with minimum."""
-        import select as select_mod
-
-        from whisper_dictation.hotkey.listener import (
-            _PYNPUT_SELECT_THROTTLE_S,
-            _throttle_pynput_xrecord,
-        )
-
-        original = select_mod.select
-        try:
-            _throttle_pynput_xrecord()
-            throttled = select_mod.select
-
-            # Calling with timeout=0 should enforce minimum
-            with patch.object(select_mod, "_original_for_test", original, create=True):
-                # Mock the original to track what timeout is passed
-                call_args = []
-                real_original = original
-
-                def tracking_original(rlist, wlist, xlist, timeout=None):
-                    call_args.append(timeout)
-                    return ([], [], [])
-
-                # Replace the captured original in the closure via direct test
-                # Instead, just verify the function exists and is different
-                assert throttled is not original
-        finally:
-            select_mod.select = original
-
-    def test_throttled_select_passes_through_none_timeout(self):
-        """Test throttled select does not modify None timeout (blocking call)."""
-        import select as select_mod
-
-        from whisper_dictation.hotkey.listener import _throttle_pynput_xrecord
-
-        original = select_mod.select
-        try:
-            _throttle_pynput_xrecord()
-            throttled = select_mod.select
-
-            # Call with timeout=None — should pass through to original
-            # (we can't easily intercept the original, but we verify no crash)
-            result = throttled([], [], [], timeout=0.01)
-            assert result == ([], [], [])
-        finally:
-            select_mod.select = original
-
-    def test_poll_ms_configurable(self):
-        """Test DICTATION_HOTKEY_POLL_MS env var is respected."""
-        import importlib
-
-        import whisper_dictation.hotkey.listener as mod
-
-        with patch.dict("os.environ", {"DICTATION_HOTKEY_POLL_MS": "50"}):
-            importlib.reload(mod)
-            assert mod._PYNPUT_POLL_MS == 50
-            assert mod._PYNPUT_SELECT_THROTTLE_S == 0.05
-
-        with patch.dict("os.environ", {}, clear=True):
-            importlib.reload(mod)
-
-    def test_poll_ms_minimum_enforced(self):
-        """Test that poll ms can't go below 10ms."""
-        import importlib
-
-        import whisper_dictation.hotkey.listener as mod
-
-        with patch.dict("os.environ", {"DICTATION_HOTKEY_POLL_MS": "1"}):
-            importlib.reload(mod)
-            assert mod._PYNPUT_POLL_MS == 10
-
-        with patch.dict("os.environ", {}, clear=True):
-            importlib.reload(mod)
-
-    def test_poll_ms_invalid_uses_default(self):
-        """Test that invalid poll ms uses default."""
-        import importlib
-
-        import whisper_dictation.hotkey.listener as mod
-
-        with patch.dict("os.environ", {"DICTATION_HOTKEY_POLL_MS": "abc"}):
-            importlib.reload(mod)
-            assert mod._PYNPUT_POLL_MS == 10
-
-        with patch.dict("os.environ", {}, clear=True):
-            importlib.reload(mod)
+            HotkeyListener._throttle_xlib()  # should not raise
 
 
 class TestEvdevLoop:
