@@ -628,7 +628,7 @@ class TestLoadOnnxModel:
 
         try:
             # Create a fake cached model file
-            cache_dir = tmp_path / "whisper-dictation"
+            cache_dir = tmp_path / "faster-whisper-dictation"
             cache_dir.mkdir()
             (cache_dir / "silero_vad.onnx").write_text("fake")
 
