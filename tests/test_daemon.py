@@ -312,10 +312,34 @@ class TestOnDeactivate:
 
     @patch("whisper_dictation.daemon.notify")
     @patch("whisper_dictation.daemon.create_engine")
-    def test_deactivate_batch_transcribes_full_audio(self, mock_create, mock_notify):
-        """Batch mode: deactivate concatenates chunks and transcribes."""
+    def test_deactivate_batch_transcribes_full_audio_server(self, mock_create, mock_notify):
+        """Batch mode + server engine: uses WS batch transcription."""
         mock_create.return_value = MagicMock()
-        daemon = DictationDaemon(Config())
+        daemon = DictationDaemon(Config())  # default engine=server
+        daemon._recording = True
+        daemon._audio = MagicMock()
+        daemon._recorded_chunks = [
+            np.ones(512, dtype=np.float32),
+            np.ones(512, dtype=np.float32),
+        ]
+
+        mock_pool = MagicMock()
+        daemon._transcribe_pool = mock_pool
+
+        daemon._on_deactivate()
+
+        mock_pool.submit.assert_called_once()
+        args = mock_pool.submit.call_args[0]
+        assert args[0] == daemon._transcribe_batch_ws
+        assert len(args[1]) == 1024
+
+    @patch("whisper_dictation.daemon.notify")
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_deactivate_batch_transcribes_full_audio_local(self, mock_create, mock_notify):
+        """Batch mode + local engine: uses local transcribe_and_type."""
+        mock_create.return_value = MagicMock()
+        local_config = replace(Config(), engine=EngineConfig(type="local"))
+        daemon = DictationDaemon(local_config)
         daemon._recording = True
         daemon._audio = MagicMock()
         daemon._recorded_chunks = [

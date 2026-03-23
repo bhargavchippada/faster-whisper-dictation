@@ -106,6 +106,27 @@ class DictationDaemon:
         except Exception:
             log.error("Transcription or typing failed", exc_info=True)
 
+    def _transcribe_batch_ws(self, audio: np.ndarray) -> None:
+        """Transcribe via WebSocket batch mode and type the result."""
+        try:
+            ws_cfg = self.config.websocket
+            ws = WebSocketEngine(
+                server_url=self.config.server.url,
+                model=self.config.server.model,
+                language=self.config.server.language,
+                reconnect_attempts=ws_cfg.reconnect_attempts,
+                reconnect_delay=ws_cfg.reconnect_delay,
+            )
+            text = ws.transcribe_batch(audio, self.config.audio.sample_rate)
+            if text:
+                type_text(text + " ")
+                log.debug("WS batch typed: %d chars", len(text))
+            else:
+                log.info("No speech detected (WS batch)")
+                notify("No speech", "Nothing was transcribed")
+        except Exception:
+            log.error("WS batch transcription failed", exc_info=True)
+
     def _on_activate(self) -> None:
         """Hotkey pressed — start recording."""
         with self._lock:
@@ -169,19 +190,21 @@ class DictationDaemon:
             self._recorded_chunks.clear()
             audio = self._audio
             self._audio = None
+            # Capture WS engine under lock to prevent race with stop()
+            ws_engine = self._ws_engine
+            self._ws_engine = None
 
         log.info("Recording stopped")
 
         if audio is not None:
             audio.stop()
 
-        if self._use_ws and self._ws_engine is not None:
-            self._ws_engine.flush()
-            # Wait for server to finish transcribing before closing
-            if not self._ws_engine.wait_for_completion(timeout=5.0):
+        if self._use_ws and ws_engine is not None:
+            # Streaming WS: flush and wait for final transcription
+            ws_engine.flush()
+            if not ws_engine.wait_for_completion(timeout=5.0):
                 log.debug("WS transcription did not complete within timeout")
-            self._ws_engine.close()
-            self._ws_engine = None
+            ws_engine.close()
         elif self.streaming:
             # Local-engine streaming: flush remaining VAD-buffered speech
             remaining = self._vad.flush()
@@ -193,7 +216,11 @@ class DictationDaemon:
             duration = len(full_audio) / self.config.audio.sample_rate
             log.info("Transcribing %.1fs of audio...", duration)
             notify("Transcribing", f"{duration:.0f}s of audio...")
-            self._transcribe_pool.submit(self._transcribe_and_type, full_audio)
+            if self.config.engine.type == "server":
+                # Use WebSocket for batch (shared model, no REST needed)
+                self._transcribe_pool.submit(self._transcribe_batch_ws, full_audio)
+            else:
+                self._transcribe_pool.submit(self._transcribe_and_type, full_audio)
         else:
             notify("Stopped", "No audio recorded")
 
@@ -250,9 +277,12 @@ class DictationDaemon:
             self._hotkey.stop()
             self._hotkey = None
 
-        if self._ws_engine is not None:
-            self._ws_engine.close()
+        # Capture under lock — _on_deactivate may have already cleared it
+        with self._lock:
+            ws_engine = self._ws_engine
             self._ws_engine = None
+        if ws_engine is not None:
+            ws_engine.close()
         self._transcribe_pool.shutdown(wait=True, cancel_futures=True)
         self._engine.close()
         log.info("Dictation daemon stopped")

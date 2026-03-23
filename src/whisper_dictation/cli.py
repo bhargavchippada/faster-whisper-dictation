@@ -329,6 +329,10 @@ channels = 1                          # Number of audio channels (1 = mono)
 type = "server"                       # "server" (Docker/remote) or "local" (local)
 compute_type = "auto"                 # "auto", "float16" (GPU), "int8" (CPU)
 device = "auto"                       # "auto", "cuda", "cpu"
+
+[websocket]
+reconnect_attempts = 3                # Number of reconnection attempts
+reconnect_delay = 1.0                 # Seconds between reconnection attempts
 """
 
 
@@ -412,6 +416,21 @@ def cmd_transcribe(args: argparse.Namespace) -> None:
     validate(config)
 
     from .engine import create_engine
+    from .engine.websocket import WebSocketEngine
+
+    def _transcribe(audio: np.ndarray, sr: int) -> str:
+        """Transcribe via WS batch (server) or REST/local engine."""
+        if config.engine.type == "server":
+            ws_cfg = config.websocket
+            ws = WebSocketEngine(
+                server_url=config.server.url,
+                model=config.server.model,
+                language=config.server.language,
+                reconnect_attempts=ws_cfg.reconnect_attempts,
+                reconnect_delay=ws_cfg.reconnect_delay,
+            )
+            return ws.transcribe_batch(audio, sr)
+        return engine.transcribe(audio, sr)
 
     engine = create_engine(config)
     try:
@@ -431,7 +450,7 @@ def cmd_transcribe(args: argparse.Namespace) -> None:
                 print(f"Cannot read audio file (WAV format required): {e}", file=sys.stderr)
                 sys.exit(1)
 
-            text = engine.transcribe(audio, sr)
+            text = _transcribe(audio, sr)
             if text:
                 print(text)
             else:
@@ -458,7 +477,7 @@ def cmd_transcribe(args: argparse.Namespace) -> None:
             sd.wait()
             print("Transcribing...", file=sys.stderr)
 
-            text = engine.transcribe(audio.flatten(), config.audio.sample_rate)
+            text = _transcribe(audio.flatten(), config.audio.sample_rate)
             if text:
                 print(text)
             else:
