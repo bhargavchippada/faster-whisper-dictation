@@ -16,6 +16,7 @@ from whisper_dictation.engine.websocket import (
     _build_session_update,
     _encode_audio_b64,
     _http_to_ws_url,
+    _resample_16k_to_24k,
 )
 
 # ---------------------------------------------------------------------------
@@ -77,34 +78,61 @@ class TestBuildAudioCommit:
 # ---------------------------------------------------------------------------
 
 
+class TestResample16kTo24k:
+    def test_output_length(self):
+        audio = np.zeros(512, dtype=np.float32)
+        resampled = _resample_16k_to_24k(audio)
+        assert len(resampled) == 768  # 512 * 3 / 2
+
+    def test_preserves_values(self):
+        audio = np.ones(100, dtype=np.float32) * 0.5
+        resampled = _resample_16k_to_24k(audio)
+        np.testing.assert_allclose(resampled, 0.5, atol=0.01)
+
+
 class TestEncodeAudioB64:
-    def test_float32_encoding(self):
+    def test_float32_encoding_with_resample(self):
+        audio = np.ones(100, dtype=np.float32) * 0.5
+        b64 = _encode_audio_b64(audio, resample_24k=True)
+        decoded = base64.b64decode(b64)
+        pcm = np.frombuffer(decoded, dtype=np.int16)
+        # Resampled: 100 * 3/2 = 150 samples
+        assert len(pcm) == 150
+        assert all(abs(s - 16384) < 100 for s in pcm)
+
+    def test_float32_encoding_no_resample(self):
         audio = np.array([0.5, -0.5], dtype=np.float32)
-        b64 = _encode_audio_b64(audio)
-        decoded = base64.b64decode(b64)
-        pcm = np.frombuffer(decoded, dtype=np.int16)
-        assert pcm[0] == 16384  # 0.5 * 32768
-        assert pcm[1] == -16384
-
-    def test_int16_passthrough(self):
-        audio = np.array([100, -100], dtype=np.int16)
-        b64 = _encode_audio_b64(audio)
-        decoded = base64.b64decode(b64)
-        pcm = np.frombuffer(decoded, dtype=np.int16)
-        assert pcm[0] == 100
-        assert pcm[1] == -100
-
-    def test_float64_encoding(self):
-        audio = np.array([0.5, -0.5], dtype=np.float64)
-        b64 = _encode_audio_b64(audio)
+        b64 = _encode_audio_b64(audio, resample_24k=False)
         decoded = base64.b64decode(b64)
         pcm = np.frombuffer(decoded, dtype=np.int16)
         assert pcm[0] == 16384
         assert pcm[1] == -16384
 
+    def test_int16_no_resample(self):
+        audio = np.array([100, -100], dtype=np.int16)
+        b64 = _encode_audio_b64(audio, resample_24k=False)
+        decoded = base64.b64decode(b64)
+        pcm = np.frombuffer(decoded, dtype=np.int16)
+        assert pcm[0] == 100
+        assert pcm[1] == -100
+
+    def test_int16_with_resample(self):
+        audio = np.ones(100, dtype=np.int16) * 100
+        b64 = _encode_audio_b64(audio, resample_24k=True)
+        decoded = base64.b64decode(b64)
+        pcm = np.frombuffer(decoded, dtype=np.int16)
+        assert len(pcm) == 150
+
+    def test_float64_encoding(self):
+        audio = np.ones(100, dtype=np.float64) * 0.5
+        b64 = _encode_audio_b64(audio, resample_24k=True)
+        decoded = base64.b64decode(b64)
+        pcm = np.frombuffer(decoded, dtype=np.int16)
+        assert len(pcm) == 150
+
     def test_clipping(self):
         audio = np.array([1.5, -1.5], dtype=np.float32)
-        b64 = _encode_audio_b64(audio)
+        b64 = _encode_audio_b64(audio, resample_24k=False)
         decoded = base64.b64decode(b64)
         pcm = np.frombuffer(decoded, dtype=np.int16)
         assert pcm[0] == 32767
@@ -531,3 +559,107 @@ class TestWebSocketEngineReceiverLoop:
         engine._ws = MagicMock()
 
         engine._receiver_loop()  # should exit immediately
+
+    def test_receiver_exits_when_ws_none(self):
+        engine = WebSocketEngine(
+            server_url="http://localhost:10300",
+            model="tiny",
+            language="en",
+            on_text=MagicMock(),
+        )
+        engine._ws = None  # ws already cleared by close()
+
+        engine._receiver_loop()  # should exit immediately
+
+
+class TestWebSocketEngineSenderLoopEdgeCases:
+    def test_sender_exits_when_ws_none(self):
+        engine = WebSocketEngine(
+            server_url="http://localhost:10300",
+            model="tiny",
+            language="en",
+            on_text=MagicMock(),
+        )
+        engine._ws = None
+        engine._send_queue.put('{"type": "test"}')
+
+        engine._sender_loop()  # should exit on ws=None check
+
+    def test_sender_handles_empty_queue_timeout(self):
+        engine = WebSocketEngine(
+            server_url="http://localhost:10300",
+            model="tiny",
+            language="en",
+            on_text=MagicMock(),
+        )
+        engine._ws = MagicMock()
+        # Stop after one empty-queue iteration
+        engine._stop_event.set()
+
+        engine._sender_loop()  # should exit via stop_event after queue.Empty
+
+
+class TestWebSocketEngineWaitForCompletion:
+    def test_returns_true_when_completed(self):
+        engine = WebSocketEngine(
+            server_url="http://localhost:10300",
+            model="tiny",
+            language="en",
+            on_text=MagicMock(),
+        )
+        engine._flush_done.set()
+        assert engine.wait_for_completion(timeout=0.1) is True
+
+    def test_returns_false_on_timeout(self):
+        engine = WebSocketEngine(
+            server_url="http://localhost:10300",
+            model="tiny",
+            language="en",
+            on_text=MagicMock(),
+        )
+        assert engine.wait_for_completion(timeout=0.01) is False
+
+
+class TestWebSocketEngineCloseEdgeCases:
+    def test_close_with_full_queue(self):
+        """Close when queue is full — sentinel put_nowait should handle Full."""
+        engine = WebSocketEngine(
+            server_url="http://localhost:10300",
+            model="tiny",
+            language="en",
+            on_text=MagicMock(),
+        )
+        engine._connected.set()
+        # Fill the queue completely
+        for _ in range(engine._send_queue.maxsize):
+            engine._send_queue.put_nowait("filler")
+
+        engine.close()  # should not raise despite full queue
+
+    def test_close_drains_queue(self):
+        """Close drains remaining queued items."""
+        engine = WebSocketEngine(
+            server_url="http://localhost:10300",
+            model="tiny",
+            language="en",
+            on_text=MagicMock(),
+        )
+        engine._send_queue.put("item1")
+        engine._send_queue.put("item2")
+
+        engine.close()
+        assert engine._send_queue.empty()
+
+    def test_flush_when_queue_full(self):
+        """Flush when queue is full — should not raise."""
+        engine = WebSocketEngine(
+            server_url="http://localhost:10300",
+            model="tiny",
+            language="en",
+            on_text=MagicMock(),
+        )
+        engine._connected.set()
+        for _ in range(engine._send_queue.maxsize):
+            engine._send_queue.put_nowait("filler")
+
+        engine.flush()  # should not raise

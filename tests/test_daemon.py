@@ -607,6 +607,24 @@ class TestWebSocketStreaming:
         mock_ws.close.assert_called_once()
         assert daemon._ws_engine is None
 
+    @patch("whisper_dictation.daemon.notify")
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_ws_deactivate_handles_timeout(self, mock_create, mock_notify):
+        """WS streaming: deactivate handles transcription timeout gracefully."""
+        mock_create.return_value = MagicMock()
+        daemon = DictationDaemon(Config(), streaming=True)
+        daemon._recording = True
+        mock_ws = MagicMock()
+        mock_ws.wait_for_completion.return_value = False  # timeout
+        daemon._ws_engine = mock_ws
+        daemon._audio = MagicMock()
+
+        daemon._on_deactivate()
+
+        mock_ws.flush.assert_called_once()
+        mock_ws.wait_for_completion.assert_called_once()
+        mock_ws.close.assert_called_once()
+
     @patch("whisper_dictation.daemon.type_text")
     @patch("whisper_dictation.daemon.create_engine")
     def test_ws_text_callback_types_text(self, mock_create, mock_type):

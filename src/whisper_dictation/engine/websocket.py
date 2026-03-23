@@ -60,12 +60,29 @@ def _build_audio_commit() -> dict:
     return {"type": "input_audio_buffer.commit"}
 
 
-def _encode_audio_b64(audio: np.ndarray) -> str:
-    """Encode audio as base64 PCM int16."""
+def _resample_16k_to_24k(audio: np.ndarray) -> np.ndarray:
+    """Resample 16kHz audio to 24kHz using linear interpolation (ratio 3:2)."""
+    n = len(audio)
+    new_n = n * 3 // 2
+    indices = np.arange(new_n) * (n - 1) / (new_n - 1) if new_n > 1 else np.array([0.0])
+    return np.interp(indices, np.arange(n), audio)
+
+
+def _encode_audio_b64(audio: np.ndarray, resample_24k: bool = True) -> str:
+    """Encode audio as base64 PCM int16, optionally resampling 16kHz→24kHz.
+
+    The Speaches Realtime API expects 24kHz PCM16 mono audio.
+    """
     if audio.dtype in (np.float32, np.float64):
+        if resample_24k:
+            audio = _resample_16k_to_24k(audio)
         pcm = (audio * 32768).clip(-32768, 32767).astype(np.int16)
     else:
-        pcm = audio.astype(np.int16)
+        if resample_24k:
+            audio = _resample_16k_to_24k(audio.astype(np.float32) / 32768.0)
+            pcm = (audio * 32768).clip(-32768, 32767).astype(np.int16)
+        else:
+            pcm = audio.astype(np.int16)
     return base64.b64encode(pcm.tobytes()).decode("ascii")
 
 

@@ -6,12 +6,24 @@ services:
     ports:
       - "127.0.0.1:10300:10300"
     environment:
+      # Whisper / STT
       - WHISPER__INFERENCE_DEVICE=cuda
       - WHISPER__COMPUTE_TYPE=float16
-      - UVICORN_HOST=0.0.0.0  # bind all interfaces inside container; host-side restricted by ports mapping
+      - WHISPER__NUM_WORKERS=1
+      # Server
+      - UVICORN_HOST=0.0.0.0
       - UVICORN_PORT=10300
-      - LOOPBACK_HOST_URL=http://localhost:10300  # required for Realtime API (WS transcription)
+      # Realtime API (WebSocket) — server calls itself for transcription
+      - LOOPBACK_HOST_URL=http://localhost:10300
+      # Model lifecycle — keep loaded permanently
+      - STT_MODEL_TTL=-1
+      - VAD_MODEL_TTL=-1
+      # Preload model at startup
       - PRELOAD_MODELS=["Systran/faster-whisper-large-v3"]
+      # Logging
+      - LOG_LEVEL=info
+      # Disable Gradio UI (API-only)
+      - ENABLE_UI=false
     volumes:
       - faster-whisper-models:/home/ubuntu/.cache/huggingface
     deploy:
