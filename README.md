@@ -245,11 +245,12 @@ device = "auto"          # "auto", "cuda", "cpu"
 | `DICTATION_AUDIO_DEVICE` | (system default) | Audio input device name |
 | `DICTATION_SAMPLE_RATE` | `16000` | Audio sample rate (Hz) |
 | `DICTATION_VAD_THRESHOLD` | `0.5` | VAD confidence threshold (0.0-1.0) |
-| `DICTATION_VAD_SILENCE_MS` | `800` | Silence duration to end utterance (ms) |
+| `DICTATION_VAD_SILENCE_MS` | `200` | Silence duration to end utterance (ms) |
 | `DICTATION_VAD_MIN_SPEECH_MS` | `250` | Minimum speech duration to accept (ms) |
 | `DICTATION_VAD_MAX_SPEECH_S` | `90.0` | Maximum single utterance duration (s) |
 | `DICTATION_VAD_MODEL_URL` | (pinned release) | Custom Silero VAD ONNX model URL |
 | `DICTATION_VAD_VERIFY_HASH` | `false` | Enable SHA-256 hash verification on model download |
+| `DICTATION_PASTE_DELAY` | `0.15` | Clipboard paste delay in seconds (0.0-10.0) |
 
 ## Architecture
 
@@ -270,7 +271,7 @@ faster-whisper-dictation/
 │   ├── vad.py              # Silero VAD (ONNX, SHA-256 verified)
 │   ├── typer.py            # Platform-aware text input (clipboard + paste)
 │   └── notifier.py         # Cross-platform desktop notifications
-├── tests/                  # 342 tests, 100% coverage
+├── tests/                  # 345 tests, 100% coverage
 ├── .github/workflows/      # CI: lint + test on Python 3.10-3.14
 ├── docker-compose.yml      # GPU server
 ├── docker-compose.cpu.yml  # CPU server
