@@ -10,13 +10,13 @@ log = logging.getLogger(__name__)
 
 
 def notify(title: str, message: str = "") -> None:
-    """Show a desktop notification. Best-effort, never raises."""
+    """Show a desktop notification. Best-effort, non-blocking, never raises."""
     try:
         if sys.platform == "linux":
-            subprocess.run(
+            subprocess.Popen(
                 ["notify-send", "-t", "2000", "-a", "Dictation", title, message],
-                capture_output=True,
-                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
         elif sys.platform == "darwin":
             # Escape characters that break AppleScript string literals
@@ -30,10 +30,10 @@ def notify(title: str, message: str = "") -> None:
             safe_title = _applescript_escape(title)
             safe_message = _applescript_escape(message)
             script = f'display notification "{safe_message}" with title "{safe_title}"'
-            subprocess.run(
+            subprocess.Popen(
                 ["osascript", "-e", script],
-                capture_output=True,
-                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
         else:
             # Windows — use plyer as fallback

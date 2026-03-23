@@ -9,13 +9,13 @@ from whisper_dictation.notifier import notify
 
 class TestNotifyLinux:
     @patch("whisper_dictation.notifier.sys")
-    @patch("whisper_dictation.notifier.subprocess.run")
-    def test_calls_notify_send(self, mock_run, mock_sys):
+    @patch("whisper_dictation.notifier.subprocess.Popen")
+    def test_calls_notify_send(self, mock_popen, mock_sys):
         mock_sys.platform = "linux"
         notify("Title", "Body text")
 
-        mock_run.assert_called_once()
-        args = mock_run.call_args[0][0]
+        mock_popen.assert_called_once()
+        args = mock_popen.call_args[0][0]
         assert args[0] == "notify-send"
         assert "-t" in args
         assert "2000" in args
@@ -23,32 +23,32 @@ class TestNotifyLinux:
         assert "Body text" in args
 
     @patch("whisper_dictation.notifier.sys")
-    @patch("whisper_dictation.notifier.subprocess.run")
-    def test_empty_message(self, mock_run, mock_sys):
+    @patch("whisper_dictation.notifier.subprocess.Popen")
+    def test_empty_message(self, mock_popen, mock_sys):
         mock_sys.platform = "linux"
         notify("Title", "")
-        mock_run.assert_called_once()
-        args = mock_run.call_args[0][0]
+        mock_popen.assert_called_once()
+        args = mock_popen.call_args[0][0]
         assert "Title" in args
 
     @patch("whisper_dictation.notifier.sys")
-    @patch("whisper_dictation.notifier.subprocess.run")
-    def test_file_not_found_handled(self, mock_run, mock_sys):
+    @patch("whisper_dictation.notifier.subprocess.Popen")
+    def test_file_not_found_handled(self, mock_popen, mock_sys):
         mock_sys.platform = "linux"
-        mock_run.side_effect = FileNotFoundError("notify-send not found")
+        mock_popen.side_effect = FileNotFoundError("notify-send not found")
         # Should not raise
         notify("Title", "Message")
 
 
 class TestNotifyMacos:
     @patch("whisper_dictation.notifier.sys")
-    @patch("whisper_dictation.notifier.subprocess.run")
-    def test_calls_osascript(self, mock_run, mock_sys):
+    @patch("whisper_dictation.notifier.subprocess.Popen")
+    def test_calls_osascript(self, mock_popen, mock_sys):
         mock_sys.platform = "darwin"
         notify("Alert", "Something happened")
 
-        mock_run.assert_called_once()
-        args = mock_run.call_args[0][0]
+        mock_popen.assert_called_once()
+        args = mock_popen.call_args[0][0]
         assert args[0] == "osascript"
         assert "-e" in args
         # Script should contain title and message
@@ -59,14 +59,14 @@ class TestNotifyMacos:
 
 class TestNotifyMacosEscape:
     @patch("whisper_dictation.notifier.sys")
-    @patch("whisper_dictation.notifier.subprocess.run")
-    def test_strips_control_characters(self, mock_run, mock_sys):
+    @patch("whisper_dictation.notifier.subprocess.Popen")
+    def test_strips_control_characters(self, mock_popen, mock_sys):
         """Test AppleScript escape strips null bytes and control chars."""
         mock_sys.platform = "darwin"
         notify("Title\x00", "Body\x01\x7f")
 
-        mock_run.assert_called_once()
-        script = mock_run.call_args[0][0][2]
+        mock_popen.assert_called_once()
+        script = mock_popen.call_args[0][0][2]
         assert "\x00" not in script
         assert "\x01" not in script
         assert "\x7f" not in script
@@ -74,27 +74,27 @@ class TestNotifyMacosEscape:
         assert "Body" in script
 
     @patch("whisper_dictation.notifier.sys")
-    @patch("whisper_dictation.notifier.subprocess.run")
-    def test_escapes_backslash_and_quotes(self, mock_run, mock_sys):
+    @patch("whisper_dictation.notifier.subprocess.Popen")
+    def test_escapes_backslash_and_quotes(self, mock_popen, mock_sys):
         """Test AppleScript escape handles backslashes and double quotes."""
         mock_sys.platform = "darwin"
         notify('Say "hello"', "path\\to\\file")
 
-        mock_run.assert_called_once()
-        script = mock_run.call_args[0][0][2]
+        mock_popen.assert_called_once()
+        script = mock_popen.call_args[0][0][2]
         assert '\\"hello\\"' in script
         # Backslashes should be doubled for AppleScript
         assert "path\\\\to\\\\file" in script
 
     @patch("whisper_dictation.notifier.sys")
-    @patch("whisper_dictation.notifier.subprocess.run")
-    def test_escapes_carriage_return(self, mock_run, mock_sys):
+    @patch("whisper_dictation.notifier.subprocess.Popen")
+    def test_escapes_carriage_return(self, mock_popen, mock_sys):
         """Test AppleScript escape handles carriage returns."""
         mock_sys.platform = "darwin"
         notify("Title\r", "Body\r")
 
-        mock_run.assert_called_once()
-        script = mock_run.call_args[0][0][2]
+        mock_popen.assert_called_once()
+        script = mock_popen.call_args[0][0][2]
         assert "\r" not in script
 
 
@@ -144,17 +144,17 @@ class TestNotifyWindows:
 
 class TestNotifyGenericErrors:
     @patch("whisper_dictation.notifier.sys")
-    @patch("whisper_dictation.notifier.subprocess.run")
-    def test_generic_exception_handled(self, mock_run, mock_sys):
+    @patch("whisper_dictation.notifier.subprocess.Popen")
+    def test_generic_exception_handled(self, mock_popen, mock_sys):
         mock_sys.platform = "linux"
-        mock_run.side_effect = RuntimeError("unexpected error")
+        mock_popen.side_effect = RuntimeError("unexpected error")
         # Should not raise
         notify("Title", "Message")
 
     @patch("whisper_dictation.notifier.sys")
-    @patch("whisper_dictation.notifier.subprocess.run")
-    def test_never_raises(self, mock_run, mock_sys):
+    @patch("whisper_dictation.notifier.subprocess.Popen")
+    def test_never_raises(self, mock_popen, mock_sys):
         """notify should never propagate exceptions."""
         mock_sys.platform = "linux"
-        mock_run.side_effect = OSError("permission denied")
+        mock_popen.side_effect = OSError("permission denied")
         notify("Title", "Message")
