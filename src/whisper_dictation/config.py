@@ -201,7 +201,7 @@ def validate(config: Config) -> None:
             errors.append(f"server.url must use http or https scheme, got '{parsed.scheme}'")
         if not parsed.hostname:
             errors.append("server.url must have a valid hostname")
-    except (ValueError, TypeError):
+    except (ValueError, TypeError):  # pragma: no cover — defensive, urlparse rarely raises
         errors.append(f"server.url is not a valid URL: {config.server.url!r}")
 
     if errors:

@@ -201,7 +201,7 @@ def cmd_status(args: argparse.Namespace) -> None:
             print(f"  Hotkey:  {state.get('hotkey', '?')}")
             print(f"  Engine:  {state.get('engine', '?')}")
             print(f"  Server:  {state.get('server_url', '?')}")
-        except Exception:
+        except (json.JSONDecodeError, KeyError, TypeError):
             log.debug("Could not parse state file", exc_info=True)
 
 

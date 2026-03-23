@@ -84,7 +84,7 @@ class HotkeyListener:
             try:
                 self._listener.stop()
             except Exception:
-                pass
+                log.debug("Error stopping listener", exc_info=True)
             self._listener = None
 
     def _start_pynput(self) -> None:

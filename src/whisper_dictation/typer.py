@@ -110,11 +110,17 @@ def _type_windows(text: str) -> None:
         log.error("Windows typing failed", exc_info=True)
 
 
+_CF_UNICODETEXT = 13
+_GMEM_MOVEABLE = 0x0002
+_VK_CONTROL = 0x11
+_VK_V = 0x56
+_KEYEVENTF_KEYUP = 0x0002
+
+
 def _win_clipboard_get() -> str:
     """Read clipboard text on Windows via Win32 API."""
     import ctypes
 
-    CF_UNICODETEXT = 13
     user32 = ctypes.windll.user32
     kernel32 = ctypes.windll.kernel32
 
@@ -122,7 +128,7 @@ def _win_clipboard_get() -> str:
         log.debug("Failed to open clipboard for reading")
         return ""
     try:
-        handle = user32.GetClipboardData(CF_UNICODETEXT)
+        handle = user32.GetClipboardData(_CF_UNICODETEXT)
         if not handle:
             return ""
         ptr = kernel32.GlobalLock(handle)
@@ -138,13 +144,11 @@ def _win_clipboard_set(text: str) -> None:
     """Write text to clipboard on Windows via Win32 API."""
     import ctypes
 
-    CF_UNICODETEXT = 13
-    GMEM_MOVEABLE = 0x0002
     user32 = ctypes.windll.user32
     kernel32 = ctypes.windll.kernel32
 
     encoded = text.encode("utf-16-le") + b"\x00\x00"
-    handle = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(encoded))
+    handle = kernel32.GlobalAlloc(_GMEM_MOVEABLE, len(encoded))
     if not handle:
         raise RuntimeError("GlobalAlloc failed")
     ptr = kernel32.GlobalLock(handle)
@@ -160,7 +164,7 @@ def _win_clipboard_set(text: str) -> None:
         return
     try:
         user32.EmptyClipboard()
-        user32.SetClipboardData(CF_UNICODETEXT, handle)
+        user32.SetClipboardData(_CF_UNICODETEXT, handle)
     finally:
         user32.CloseClipboard()
 
@@ -169,15 +173,11 @@ def _send_ctrl_v() -> None:
     """Send Ctrl+V on Windows via ctypes."""
     import ctypes
 
-    VK_CONTROL = 0x11
-    VK_V = 0x56
-    KEYEVENTF_KEYUP = 0x0002
-
     user32 = ctypes.windll.user32
-    user32.keybd_event(VK_CONTROL, 0, 0, 0)
-    user32.keybd_event(VK_V, 0, 0, 0)
-    user32.keybd_event(VK_V, 0, KEYEVENTF_KEYUP, 0)
-    user32.keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0)
+    user32.keybd_event(_VK_CONTROL, 0, 0, 0)
+    user32.keybd_event(_VK_V, 0, 0, 0)
+    user32.keybd_event(_VK_V, 0, _KEYEVENTF_KEYUP, 0)
+    user32.keybd_event(_VK_CONTROL, 0, _KEYEVENTF_KEYUP, 0)
 
 
 def type_text(text: str) -> None:
