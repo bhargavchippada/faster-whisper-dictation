@@ -14,6 +14,7 @@ from whisper_dictation.config import (
     HotkeyConfig,
     ServerConfig,
     VADConfig,
+    WebSocketConfig,
     _apply_env_overrides,
     _build_section,
     load_config,
@@ -383,4 +384,31 @@ class TestValidate:
         # urlparse(None) raises TypeError on some versions — the except branch handles it
         cfg = Config(server=ServerConfig(url="not-a-url-without-scheme"))
         with pytest.raises(ValueError, match="server.url must use http or https"):
+            validate(cfg)
+
+    # WebSocket config validation
+
+    def test_ws_reconnect_attempts_negative(self):
+        cfg = Config(websocket=WebSocketConfig(reconnect_attempts=-1))
+        with pytest.raises(ValueError, match="websocket.reconnect_attempts"):
+            validate(cfg)
+
+    def test_ws_reconnect_delay_zero(self):
+        cfg = Config(websocket=WebSocketConfig(reconnect_delay=0.0))
+        with pytest.raises(ValueError, match="websocket.reconnect_delay"):
+            validate(cfg)
+
+    def test_ws_reconnect_delay_too_high(self):
+        cfg = Config(websocket=WebSocketConfig(reconnect_delay=31.0))
+        with pytest.raises(ValueError, match="websocket.reconnect_delay"):
+            validate(cfg)
+
+    def test_ws_silence_ms_zero(self):
+        cfg = Config(websocket=WebSocketConfig(server_vad_silence_ms=0))
+        with pytest.raises(ValueError, match="websocket.server_vad_silence_ms"):
+            validate(cfg)
+
+    def test_ws_vad_threshold_out_of_range(self):
+        cfg = Config(websocket=WebSocketConfig(server_vad_threshold=1.5))
+        with pytest.raises(ValueError, match="websocket.server_vad_threshold"):
             validate(cfg)

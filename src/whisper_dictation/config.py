@@ -64,12 +64,21 @@ class EngineConfig:
 
 
 @dataclass(frozen=True)
+class WebSocketConfig:
+    reconnect_attempts: int = 3
+    reconnect_delay: float = 1.0
+    server_vad_silence_ms: int = 500
+    server_vad_threshold: float = 0.5
+
+
+@dataclass(frozen=True)
 class Config:
     server: ServerConfig = field(default_factory=ServerConfig)
     hotkey: HotkeyConfig = field(default_factory=HotkeyConfig)
     vad: VADConfig = field(default_factory=VADConfig)
     audio: AudioConfig = field(default_factory=AudioConfig)
     engine: EngineConfig = field(default_factory=EngineConfig)
+    websocket: WebSocketConfig = field(default_factory=WebSocketConfig)
 
 
 def _apply_env_overrides(config: Config) -> Config:
@@ -93,6 +102,10 @@ def _apply_env_overrides(config: Config) -> Config:
         "DICTATION_VAD_SILENCE_MS": ("vad", "silence_ms"),
         "DICTATION_VAD_MIN_SPEECH_MS": ("vad", "min_speech_ms"),
         "DICTATION_VAD_MAX_SPEECH_S": ("vad", "max_speech_s"),
+        "DICTATION_WS_RECONNECT_ATTEMPTS": ("websocket", "reconnect_attempts"),
+        "DICTATION_WS_RECONNECT_DELAY": ("websocket", "reconnect_delay"),
+        "DICTATION_WS_SILENCE_MS": ("websocket", "server_vad_silence_ms"),
+        "DICTATION_WS_VAD_THRESHOLD": ("websocket", "server_vad_threshold"),
     }
 
     sections: dict[str, dict] = {
@@ -101,6 +114,7 @@ def _apply_env_overrides(config: Config) -> Config:
         "vad": {},
         "audio": {},
         "engine": {},
+        "websocket": {},
     }
 
     for env_key, (section, key) in env_map.items():
@@ -137,6 +151,7 @@ def _apply_env_overrides(config: Config) -> Config:
         vad=_merge_section(config.vad, sections["vad"], VADConfig),
         audio=_merge_section(config.audio, sections["audio"], AudioConfig),
         engine=_merge_section(config.engine, sections["engine"], EngineConfig),
+        websocket=_merge_section(config.websocket, sections["websocket"], WebSocketConfig),
     )
 
 
@@ -161,6 +176,7 @@ def load_config(config_path: Path | None = None) -> Config:
             vad=_build_section(raw.get("vad", {}), VADConfig),
             audio=_build_section(raw.get("audio", {}), AudioConfig),
             engine=_build_section(raw.get("engine", {}), EngineConfig),
+            websocket=_build_section(raw.get("websocket", {}), WebSocketConfig),
         )
     else:
         config = Config()
@@ -209,6 +225,21 @@ def validate(config: Config) -> None:
             errors.append("server.url must have a valid hostname")
     except (ValueError, TypeError):  # pragma: no cover — defensive, urlparse rarely raises
         errors.append(f"server.url is not a valid URL: {config.server.url!r}")
+
+    # WebSocket config
+    ws = config.websocket
+    if ws.reconnect_attempts < 0:
+        errors.append(f"websocket.reconnect_attempts must be >= 0, got {ws.reconnect_attempts}")
+    if not (0.0 < ws.reconnect_delay <= 30.0):
+        errors.append(f"websocket.reconnect_delay must be 0.0-30.0, got {ws.reconnect_delay}")
+    if ws.server_vad_silence_ms <= 0:
+        errors.append(
+            f"websocket.server_vad_silence_ms must be positive, got {ws.server_vad_silence_ms}"
+        )
+    if not (0.0 <= ws.server_vad_threshold <= 1.0):
+        errors.append(
+            f"websocket.server_vad_threshold must be 0.0-1.0, got {ws.server_vad_threshold}"
+        )
 
     if errors:
         raise ValueError("Invalid configuration:\n  - " + "\n  - ".join(errors))

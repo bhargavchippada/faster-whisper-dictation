@@ -11,6 +11,7 @@ import numpy as np
 from .audio import AudioStream
 from .config import Config
 from .engine import TranscriptionEngine, create_engine
+from .engine.websocket import WebSocketEngine
 from .hotkey import HotkeyListener
 from .notifier import notify
 from .typer import type_text
@@ -30,6 +31,13 @@ class DictationDaemon:
         self.config = config
         self.streaming = streaming
         self._engine: TranscriptionEngine = create_engine(config)
+
+        # WebSocket streaming: server handles VAD, text arrives via callback
+        # Local streaming: local VAD splits utterances, REST/local engine transcribes
+        self._use_ws = streaming and config.engine.type == "server"
+        self._ws_engine: WebSocketEngine | None = None
+
+        # VAD only needed for local-engine streaming or batch mode
         self._vad = SpeechDetector(
             sample_rate=config.audio.sample_rate,
             threshold=config.vad.threshold,
@@ -55,7 +63,9 @@ class DictationDaemon:
         if not self._recording:
             return
 
-        if self.streaming:
+        if self._use_ws and self._ws_engine is not None:
+            self._ws_engine.send_audio(audio)
+        elif self.streaming:
             self._on_audio_chunk_streaming(audio)
         else:
             with self._lock:
@@ -71,6 +81,14 @@ class DictationDaemon:
 
         if complete and utterance is not None:
             self._transcribe_pool.submit(self._transcribe_and_type, utterance)
+
+    def _on_ws_text(self, text: str) -> None:
+        """Callback from WebSocket engine when transcription text arrives."""
+        try:
+            type_text(text + " ")
+            log.debug("WS typed: %d chars", len(text))
+        except Exception:
+            log.error("Typing failed", exc_info=True)
 
     def _transcribe_and_type(self, audio: np.ndarray) -> None:
         """Transcribe audio and type the result."""
@@ -95,7 +113,29 @@ class DictationDaemon:
 
         log.info("Recording started")
         notify("Recording", "Speak now")
-        if self.streaming:
+
+        if self._use_ws:
+            ws_cfg = self.config.websocket
+            self._ws_engine = WebSocketEngine(
+                server_url=self.config.server.url,
+                model=self.config.server.model,
+                language=self.config.server.language,
+                reconnect_attempts=ws_cfg.reconnect_attempts,
+                reconnect_delay=ws_cfg.reconnect_delay,
+                server_vad_silence_ms=ws_cfg.server_vad_silence_ms,
+                server_vad_threshold=ws_cfg.server_vad_threshold,
+                on_text=self._on_ws_text,
+            )
+            try:
+                self._ws_engine.connect()
+            except Exception:
+                log.error("WebSocket connection failed", exc_info=True)
+                self._ws_engine = None
+                with self._lock:
+                    self._recording = False
+                notify("Error", "WebSocket connection failed")
+                return
+        elif self.streaming:
             self._vad.reset()
 
         audio = AudioStream(self.config.audio, self._on_audio_chunk)
@@ -129,8 +169,12 @@ class DictationDaemon:
         if audio is not None:
             audio.stop()
 
-        if self.streaming:
-            # Flush any remaining VAD-buffered speech
+        if self._use_ws and self._ws_engine is not None:
+            self._ws_engine.flush()
+            self._ws_engine.close()
+            self._ws_engine = None
+        elif self.streaming:
+            # Local-engine streaming: flush remaining VAD-buffered speech
             remaining = self._vad.flush()
             if remaining is not None:
                 self._transcribe_pool.submit(self._transcribe_and_type, remaining)
@@ -197,6 +241,9 @@ class DictationDaemon:
             self._hotkey.stop()
             self._hotkey = None
 
+        if self._ws_engine is not None:
+            self._ws_engine.close()
+            self._ws_engine = None
         self._transcribe_pool.shutdown(wait=True, cancel_futures=True)
         self._engine.close()
         log.info("Dictation daemon stopped")

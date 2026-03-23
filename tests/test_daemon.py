@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -197,10 +198,12 @@ class TestOnActivate:
     @patch("whisper_dictation.daemon.AudioStream")
     @patch("whisper_dictation.daemon.create_engine")
     def test_activate_streaming_resets_vad(self, mock_create, mock_audio_cls, mock_notify):
-        """Streaming mode: activate resets VAD state."""
+        """Local-engine streaming mode: activate resets VAD state."""
         mock_create.return_value = MagicMock()
         mock_audio_cls.return_value = MagicMock()
-        daemon = DictationDaemon(Config(), streaming=True)
+        # Use local engine so it takes the local-VAD streaming path, not WS
+        local_config = replace(Config(), engine=EngineConfig(type="local"))
+        daemon = DictationDaemon(local_config, streaming=True)
 
         with patch.object(daemon._vad, "reset") as mock_reset:
             daemon._on_activate()
@@ -531,3 +534,126 @@ class TestWait:
 
         with patch.object(daemon._running, "wait", return_value=True):
             daemon.wait()
+
+
+# ---------------------------------------------------------------------------
+# WebSocket streaming integration
+# ---------------------------------------------------------------------------
+
+
+class TestWebSocketStreaming:
+    @patch("whisper_dictation.daemon.notify")
+    @patch("whisper_dictation.daemon.AudioStream")
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_ws_activate_connects(self, mock_create, mock_audio_cls, mock_notify):
+        """WS streaming: activate creates and connects WebSocketEngine."""
+        mock_create.return_value = MagicMock()
+        mock_audio_cls.return_value = MagicMock()
+        daemon = DictationDaemon(Config(), streaming=True)
+        assert daemon._use_ws is True
+
+        with patch("whisper_dictation.daemon.WebSocketEngine") as mock_ws_cls:
+            mock_ws = MagicMock()
+            mock_ws_cls.return_value = mock_ws
+            daemon._on_activate()
+            mock_ws.connect.assert_called_once()
+
+    @patch("whisper_dictation.daemon.notify")
+    @patch("whisper_dictation.daemon.AudioStream")
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_ws_activate_connect_failure(self, mock_create, mock_audio_cls, mock_notify):
+        """WS streaming: failed connect resets recording state."""
+        mock_create.return_value = MagicMock()
+        mock_audio_cls.return_value = MagicMock()
+        daemon = DictationDaemon(Config(), streaming=True)
+
+        with patch("whisper_dictation.daemon.WebSocketEngine") as mock_ws_cls:
+            mock_ws = MagicMock()
+            mock_ws.connect.side_effect = ConnectionRefusedError("refused")
+            mock_ws_cls.return_value = mock_ws
+            daemon._on_activate()
+            assert daemon._recording is False
+            assert daemon._ws_engine is None
+
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_ws_audio_chunk_sends_to_ws(self, mock_create):
+        """WS streaming: audio chunks are sent to WebSocketEngine."""
+        mock_create.return_value = MagicMock()
+        daemon = DictationDaemon(Config(), streaming=True)
+        daemon._recording = True
+
+        mock_ws = MagicMock()
+        daemon._ws_engine = mock_ws
+
+        audio = np.zeros(512, dtype=np.float32)
+        daemon._on_audio_chunk(audio)
+
+        mock_ws.send_audio.assert_called_once()
+
+    @patch("whisper_dictation.daemon.notify")
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_ws_deactivate_flushes_and_closes(self, mock_create, mock_notify):
+        """WS streaming: deactivate flushes and closes WebSocket."""
+        mock_create.return_value = MagicMock()
+        daemon = DictationDaemon(Config(), streaming=True)
+        daemon._recording = True
+        mock_ws = MagicMock()
+        daemon._ws_engine = mock_ws
+        daemon._audio = MagicMock()
+
+        daemon._on_deactivate()
+
+        mock_ws.flush.assert_called_once()
+        mock_ws.close.assert_called_once()
+        assert daemon._ws_engine is None
+
+    @patch("whisper_dictation.daemon.type_text")
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_ws_text_callback_types_text(self, mock_create, mock_type):
+        """WS streaming: on_text callback calls type_text."""
+        mock_create.return_value = MagicMock()
+        daemon = DictationDaemon(Config(), streaming=True)
+
+        daemon._on_ws_text("hello world")
+        mock_type.assert_called_once_with("hello world ")
+
+    @patch("whisper_dictation.daemon.type_text")
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_ws_text_callback_handles_error(self, mock_create, mock_type):
+        """WS streaming: typing error is caught and logged."""
+        mock_create.return_value = MagicMock()
+        mock_type.side_effect = RuntimeError("clipboard error")
+        daemon = DictationDaemon(Config(), streaming=True)
+
+        # Should not raise
+        daemon._on_ws_text("hello")
+
+    @patch("whisper_dictation.daemon.notify")
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_stop_closes_ws_engine(self, mock_create, mock_notify):
+        """WS streaming: stop() closes WebSocketEngine."""
+        mock_create.return_value = MagicMock()
+        daemon = DictationDaemon(Config(), streaming=True)
+        mock_ws = MagicMock()
+        daemon._ws_engine = mock_ws
+        daemon._running.set()
+
+        daemon.stop()
+
+        mock_ws.close.assert_called_once()
+        assert daemon._ws_engine is None
+
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_use_ws_false_for_local_engine(self, mock_create):
+        """Local engine with streaming uses local VAD, not WebSocket."""
+        mock_create.return_value = MagicMock()
+        local_config = replace(Config(), engine=EngineConfig(type="local"))
+        daemon = DictationDaemon(local_config, streaming=True)
+        assert daemon._use_ws is False
+
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_use_ws_false_when_not_streaming(self, mock_create):
+        """Batch mode never uses WebSocket."""
+        mock_create.return_value = MagicMock()
+        daemon = DictationDaemon(Config(), streaming=False)
+        assert daemon._use_ws is False
