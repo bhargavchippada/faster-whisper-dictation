@@ -8,7 +8,7 @@ services:
     environment:
       - WHISPER__INFERENCE_DEVICE=cuda
       - WHISPER__COMPUTE_TYPE=float16
-      - UVICORN_HOST=127.0.0.1  # bind inside container to loopback only
+      - UVICORN_HOST=0.0.0.0  # bind all interfaces inside container; host-side restricted by ports mapping
       - UVICORN_PORT=10300
       - PRELOAD_MODELS=["Systran/faster-whisper-large-v3"]
     volumes:
