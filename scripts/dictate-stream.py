@@ -45,7 +45,7 @@ LANG = os.environ.get("WHISPER_LANG", "en")
 PASTE_DELAY = float(os.environ.get("DICTATION_PASTE_DELAY", "0.3"))
 
 # VAD thresholds (configurable via env)
-VAD_ENERGY_THRESHOLD = float(os.environ.get("DICTATION_VAD_ENERGY", "500"))
+VAD_ENERGY_THRESHOLD = float(os.environ.get("DICTATION_VAD_ENERGY", "150"))
 VAD_SILENCE_MS = int(os.environ.get("DICTATION_VAD_SILENCE_MS", "800"))
 VAD_MIN_SPEECH_MS = int(os.environ.get("DICTATION_VAD_MIN_SPEECH_MS", "300"))
 

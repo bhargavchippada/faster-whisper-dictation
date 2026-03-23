@@ -3,44 +3,47 @@
 from __future__ import annotations
 
 import logging
-from collections import deque
+import threading
 
 import numpy as np
 
 log = logging.getLogger(__name__)
 
-# Lazy-loaded model
+# Lazy-loaded model (protected by _model_lock)
 _model = None
-_get_speech_timestamps = None
+_model_lock = threading.Lock()
 
 
 def _load_model():
-    """Load Silero VAD model (lazy, first call only)."""
-    global _model, _get_speech_timestamps
+    """Load Silero VAD model (lazy, thread-safe, first call only)."""
+    global _model
 
     if _model is not None:
         return
 
-    try:
-        import torch
+    with _model_lock:
+        if _model is not None:
+            return  # double-checked locking
 
-        model, utils = torch.hub.load(
-            repo_or_dir="snakers4/silero-vad",
-            model="silero_vad",
-            force_reload=False,
-            onnx=True,
-        )
-        _model = model
-        _get_speech_timestamps = utils[0]
-        log.info("Silero VAD model loaded")
-    except ImportError:
-        log.warning("torch not available, Silero VAD will use ONNX fallback")
-        _load_onnx_model()
+        try:
+            import torch
+
+            model, _utils = torch.hub.load(
+                repo_or_dir="snakers4/silero-vad",
+                model="silero_vad",
+                force_reload=False,
+                onnx=True,
+            )
+            _model = model
+            log.info("Silero VAD model loaded (torch)")
+        except ImportError:
+            log.info("torch not available, using ONNX Runtime fallback")
+            _load_onnx_model()
 
 
 def _load_onnx_model():
     """Load Silero VAD via ONNX Runtime (no PyTorch needed)."""
-    global _model, _get_speech_timestamps
+    global _model
 
     import urllib.request
     from pathlib import Path
@@ -111,11 +114,13 @@ class SpeechDetector:
         threshold: float = 0.5,
         silence_ms: int = 800,
         min_speech_ms: int = 250,
+        max_speech_s: float = 90.0,
     ):
         self.sample_rate = sample_rate
         self.threshold = threshold
         self.silence_chunks = silence_ms // 32  # 32ms per chunk for Silero
         self.min_speech_chunks = min_speech_ms // 32
+        self.max_speech_chunks = int(max_speech_s * 1000 / 32)
         self.chunk_size = sample_rate * 32 // 1000  # 512 samples at 16kHz
 
         self._is_speaking = False
@@ -176,6 +181,18 @@ class SpeechDetector:
                 self._silence_count = 0
                 self._speech_frames.append(chunk)
 
+                # Guard against unbounded buffer growth
+                if self._speech_count >= self.max_speech_chunks:
+                    completed_utterance = np.concatenate(self._speech_frames)
+                    log.warning(
+                        "Utterance exceeded max duration (%.1fs), flushing",
+                        len(completed_utterance) / self.sample_rate,
+                    )
+                    self._speech_frames.clear()
+                    self._is_speaking = False
+                    self._silence_count = 0
+                    self._speech_count = 0
+
             elif self._is_speaking:
                 self._silence_count += 1
                 self._speech_frames.append(chunk)
@@ -197,6 +214,24 @@ class SpeechDetector:
                     self._speech_count = 0
 
         return (completed_utterance is not None, completed_utterance)
+
+    def flush(self) -> np.ndarray | None:
+        """Flush any buffered speech frames and return them.
+
+        Returns the concatenated audio if there are enough speech frames,
+        otherwise None. Resets internal state afterward.
+        """
+        if not self._is_speaking or not self._speech_frames:
+            return None
+
+        audio = np.concatenate(self._speech_frames)
+        has_enough = self._speech_count >= self.min_speech_chunks
+        self._speech_frames.clear()
+        self._is_speaking = False
+        self._silence_count = 0
+        self._speech_count = 0
+
+        return audio if has_enough else None
 
     @property
     def is_speaking(self) -> bool:

@@ -28,15 +28,18 @@ ORIG_WINDOW=$(get_active_window)
 check_health
 
 # Stream in a terminal — real-time transcription
-export DICTATION_OUTPUT_FILE="$OUTPUT_FILE"
-export DICTATION_SCRIPT_DIR="$SCRIPT_DIR"
-gnome-terminal --wait --title="🎤 Streaming — Enter to finish, Ctrl+C to cancel" --geometry=60x5 -- bash -c '
-  python3 "$DICTATION_SCRIPT_DIR/dictate-stream.py" --no-type > "$DICTATION_OUTPUT_FILE" &
-  PID=$!
-  trap "kill $PID 2>/dev/null; wait $PID 2>/dev/null; rm -f \"$DICTATION_OUTPUT_FILE\"; exit 1" INT
-  read -r -s -p "Press Enter when done, Ctrl+C to cancel..."
-  kill $PID 2>/dev/null; wait $PID 2>/dev/null
-'
+# Use a wrapper script to avoid env-var inheritance issues with gnome-terminal
+WRAPPER="$TMP_DIR/hotkey_wrapper.sh"
+cat > "$WRAPPER" <<WRAPPER_EOF
+#!/usr/bin/env bash
+python3 "$SCRIPT_DIR/dictate-stream.py" --no-type > "$OUTPUT_FILE" &
+PID=\$!
+trap "kill \$PID 2>/dev/null; wait \$PID 2>/dev/null; rm -f '$OUTPUT_FILE'; exit 1" INT
+read -r -s -p "Press Enter when done, Ctrl+C to cancel..."
+kill \$PID 2>/dev/null; wait \$PID 2>/dev/null
+WRAPPER_EOF
+chmod +x "$WRAPPER"
+gnome-terminal --wait --title="Dictation - Enter to finish, Ctrl+C to cancel" --geometry=60x5 -- "$WRAPPER"
 
 # Read accumulated transcripts
 if [[ ! -s "$OUTPUT_FILE" ]]; then

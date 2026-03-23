@@ -6,11 +6,13 @@ import logging
 import os
 import subprocess
 import sys
+import threading
 import time
 
 log = logging.getLogger(__name__)
 
 PASTE_DELAY = float(os.environ.get("DICTATION_PASTE_DELAY", "0.15"))
+_clipboard_lock = threading.Lock()
 
 
 def _detect_display() -> str:
@@ -47,14 +49,14 @@ def _type_linux_wayland(text: str) -> None:
         ["wl-paste"], capture_output=True, text=True, check=False,
     ).stdout
 
-    subprocess.run(["wl-copy", text], check=False)
+    subprocess.run(["wl-copy", "--", text], check=False)
     subprocess.run(
         ["ydotool", "key", "29:1", "47:1", "47:0", "29:0"],
         check=False,
     )
     time.sleep(PASTE_DELAY)
 
-    subprocess.run(["wl-copy", prev], check=False)
+    subprocess.run(["wl-copy", "--", prev], check=False)
 
 
 def _type_macos(text: str) -> None:
@@ -74,37 +76,64 @@ def _type_macos(text: str) -> None:
 
 
 def _type_windows(text: str) -> None:
-    """Type via pyperclip + keyboard simulation on Windows."""
+    """Type via clipboard + keyboard simulation on Windows."""
     try:
         import ctypes
         import ctypes.wintypes
 
-        # Save clipboard
-        prev = ""
-        try:
-            import subprocess as sp
-            r = sp.run(["powershell", "-command", "Get-Clipboard"], capture_output=True, text=True, check=False)
-            prev = r.stdout.rstrip("\n")
-        except Exception:
-            pass
-
-        # Set clipboard
-        sp.run(
-            ["powershell", "-command", f"Set-Clipboard -Value '{text}'"],
-            check=False,
-        )
-
-        # Ctrl+V via SendInput
+        # Save clipboard, set new text, paste, restore — all via Win32 API
+        prev = _win_clipboard_get()
+        _win_clipboard_set(text)
         _send_ctrl_v()
         time.sleep(PASTE_DELAY)
-
-        # Restore
-        sp.run(
-            ["powershell", "-command", f"Set-Clipboard -Value '{prev}'"],
-            check=False,
-        )
+        _win_clipboard_set(prev)
     except Exception:
         log.error("Windows typing failed", exc_info=True)
+
+
+def _win_clipboard_get() -> str:
+    """Read clipboard text on Windows via Win32 API."""
+    import ctypes
+
+    CF_UNICODETEXT = 13
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+
+    user32.OpenClipboard(0)
+    try:
+        handle = user32.GetClipboardData(CF_UNICODETEXT)
+        if not handle:
+            return ""
+        ptr = kernel32.GlobalLock(handle)
+        try:
+            return ctypes.wstring_at(ptr) if ptr else ""
+        finally:
+            kernel32.GlobalUnlock(handle)
+    finally:
+        user32.CloseClipboard()
+
+
+def _win_clipboard_set(text: str) -> None:
+    """Write text to clipboard on Windows via Win32 API."""
+    import ctypes
+
+    CF_UNICODETEXT = 13
+    GMEM_MOVEABLE = 0x0002
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+
+    encoded = text.encode("utf-16-le") + b"\x00\x00"
+    handle = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(encoded))
+    ptr = kernel32.GlobalLock(handle)
+    ctypes.memmove(ptr, encoded, len(encoded))
+    kernel32.GlobalUnlock(handle)
+
+    user32.OpenClipboard(0)
+    try:
+        user32.EmptyClipboard()
+        user32.SetClipboardData(CF_UNICODETEXT, handle)
+    finally:
+        user32.CloseClipboard()
 
 
 def _send_ctrl_v() -> None:
@@ -123,12 +152,21 @@ def _send_ctrl_v() -> None:
 
 
 def type_text(text: str) -> None:
-    """Type text into the currently focused application."""
+    """Type text into the currently focused application.
+
+    Thread-safe: acquires a lock to prevent concurrent clipboard corruption.
+    """
     if not text:
         return
 
     log.debug("Typing %d chars", len(text))
 
+    with _clipboard_lock:
+        _type_text_impl(text)
+
+
+def _type_text_impl(text: str) -> None:
+    """Internal implementation — must be called under _clipboard_lock."""
     if sys.platform == "linux":
         display = _detect_display()
         if display == "wayland":

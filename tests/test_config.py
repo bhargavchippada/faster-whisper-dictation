@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import textwrap
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -17,6 +17,7 @@ from whisper_dictation.config import (
     VADConfig,
     _apply_env_overrides,
     _build_section,
+    _validate,
     load_config,
 )
 
@@ -32,7 +33,7 @@ class TestDefaults:
         assert cfg.url == "http://localhost:10300"
         assert cfg.model == "Systran/faster-whisper-large-v3"
         assert cfg.language == "en"
-        assert cfg.timeout == 30
+        assert cfg.timeout == 10
 
     def test_hotkey_defaults(self):
         cfg = HotkeyConfig()
@@ -248,3 +249,103 @@ class TestLoadConfig:
         with patch.dict("os.environ", {}, clear=True):
             cfg = load_config(toml_path)
         assert cfg == Config()
+
+
+# ---------------------------------------------------------------------------
+# tomllib import fallback (Python < 3.11)
+# ---------------------------------------------------------------------------
+
+
+class TestTomllibImport:
+    def test_tomli_fallback_import(self):
+        """Test that config.py falls back to tomli when sys.version_info < 3.11.
+
+        This covers line 13: `import tomli as tomllib`.
+        """
+        import importlib
+        import sys
+
+        mock_version = (3, 10, 0, "final", 0)
+        mock_tomli = MagicMock()
+
+        # Save and remove the config module so reload works cleanly
+        saved_config = sys.modules.pop("whisper_dictation.config", None)
+
+        try:
+            with (
+                patch.object(sys, "version_info", mock_version),
+                patch.dict("sys.modules", {"tomli": mock_tomli, "tomllib": None}),
+            ):
+                import whisper_dictation.config as config_mod
+                importlib.reload(config_mod)
+        finally:
+            # Restore original module
+            if saved_config is not None:
+                sys.modules["whisper_dictation.config"] = saved_config
+
+
+# ---------------------------------------------------------------------------
+# _validate
+# ---------------------------------------------------------------------------
+
+
+class TestValidate:
+    def test_valid_config_passes(self):
+        _validate(Config())  # should not raise
+
+    def test_invalid_hotkey_mode(self):
+        cfg = Config(hotkey=HotkeyConfig(mode="bad"))
+        with pytest.raises(ValueError, match="hotkey.mode"):
+            _validate(cfg)
+
+    def test_invalid_engine_type(self):
+        cfg = Config(engine=EngineConfig(type="bad"))
+        with pytest.raises(ValueError, match="engine.type"):
+            _validate(cfg)
+
+    def test_vad_threshold_too_high(self):
+        cfg = Config(vad=VADConfig(threshold=1.5))
+        with pytest.raises(ValueError, match="vad.threshold"):
+            _validate(cfg)
+
+    def test_vad_threshold_negative(self):
+        cfg = Config(vad=VADConfig(threshold=-0.1))
+        with pytest.raises(ValueError, match="vad.threshold"):
+            _validate(cfg)
+
+    def test_vad_silence_ms_zero(self):
+        cfg = Config(vad=VADConfig(silence_ms=0))
+        with pytest.raises(ValueError, match="vad.silence_ms"):
+            _validate(cfg)
+
+    def test_vad_min_speech_ms_negative(self):
+        cfg = Config(vad=VADConfig(min_speech_ms=-1))
+        with pytest.raises(ValueError, match="vad.min_speech_ms"):
+            _validate(cfg)
+
+    def test_vad_max_speech_s_zero(self):
+        cfg = Config(vad=VADConfig(max_speech_s=0))
+        with pytest.raises(ValueError, match="vad.max_speech_s"):
+            _validate(cfg)
+
+    def test_server_timeout_zero(self):
+        cfg = Config(server=ServerConfig(timeout=0))
+        with pytest.raises(ValueError, match="server.timeout"):
+            _validate(cfg)
+
+    def test_audio_sample_rate_negative(self):
+        cfg = Config(audio=AudioConfig(sample_rate=-1))
+        with pytest.raises(ValueError, match="audio.sample_rate"):
+            _validate(cfg)
+
+    def test_multiple_errors(self):
+        cfg = Config(
+            hotkey=HotkeyConfig(mode="bad"),
+            engine=EngineConfig(type="bad"),
+            vad=VADConfig(threshold=5.0),
+        )
+        with pytest.raises(ValueError, match="hotkey.mode") as exc_info:
+            _validate(cfg)
+        msg = str(exc_info.value)
+        assert "engine.type" in msg
+        assert "vad.threshold" in msg

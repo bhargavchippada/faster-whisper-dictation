@@ -51,7 +51,7 @@ notify() {
 check_audio() {
   local audio_file="$1"
   local min_duration="${DICTATION_MIN_DURATION:-0.5}"
-  local min_energy="${DICTATION_MIN_ENERGY:-500}"
+  local min_energy="${DICTATION_MIN_ENERGY:-150}"
 
   # Single Python call: analyze WAV and check thresholds
   # Exit codes: 0=OK, 1=too short, 2=too quiet, 3=error

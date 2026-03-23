@@ -186,27 +186,117 @@ class TestTypeMacos:
 
 class TestTypeWindows:
     @patch("whisper_dictation.typer.time.sleep")
-    @patch("whisper_dictation.typer.subprocess.run")
+    @patch("whisper_dictation.typer._win_clipboard_set")
+    @patch("whisper_dictation.typer._win_clipboard_get", return_value="old_win")
     @patch("whisper_dictation.typer._send_ctrl_v")
-    def test_clipboard_flow(self, mock_ctrl_v, mock_run, mock_sleep):
-        mock_result = MagicMock()
-        mock_result.stdout = "old_win\n"
-        mock_run.return_value = mock_result
-
+    def test_clipboard_flow(self, mock_ctrl_v, mock_get, mock_set, mock_sleep):
         typer._type_windows("win text")
 
-        # Should call powershell Get-Clipboard, Set-Clipboard, restore
-        assert mock_run.call_count >= 2
+        mock_get.assert_called_once()
+        assert mock_set.call_count == 2
+        mock_set.assert_any_call("win text")
+        mock_set.assert_any_call("old_win")
         mock_ctrl_v.assert_called_once()
         mock_sleep.assert_called_once()
 
     @patch("whisper_dictation.typer.time.sleep")
-    @patch("whisper_dictation.typer.subprocess.run")
+    @patch("whisper_dictation.typer._win_clipboard_set", side_effect=Exception("boom"))
+    @patch("whisper_dictation.typer._win_clipboard_get", return_value="")
     @patch("whisper_dictation.typer._send_ctrl_v")
-    def test_handles_exception_gracefully(self, mock_ctrl_v, mock_run, mock_sleep):
-        mock_run.side_effect = Exception("boom")
+    def test_handles_exception_gracefully(self, mock_ctrl_v, mock_get, mock_set, mock_sleep):
         # Should not raise
         typer._type_windows("text")
+
+
+# ---------------------------------------------------------------------------
+# _send_ctrl_v
+# ---------------------------------------------------------------------------
+
+
+class TestWinClipboardGet:
+    def test_reads_clipboard_text(self):
+        mock_ctypes = MagicMock()
+        mock_user32 = MagicMock()
+        mock_kernel32 = MagicMock()
+        mock_ctypes.windll.user32 = mock_user32
+        mock_ctypes.windll.kernel32 = mock_kernel32
+
+        mock_user32.GetClipboardData.return_value = 12345
+        mock_kernel32.GlobalLock.return_value = 67890
+        mock_ctypes.wstring_at.return_value = "clipboard text"
+
+        with patch.dict("sys.modules", {"ctypes": mock_ctypes, "ctypes.wintypes": MagicMock()}):
+            result = typer._win_clipboard_get()
+
+        assert result == "clipboard text"
+        mock_user32.OpenClipboard.assert_called_once_with(0)
+        mock_user32.CloseClipboard.assert_called_once()
+        mock_kernel32.GlobalUnlock.assert_called_once()
+
+    def test_returns_empty_on_no_handle(self):
+        mock_ctypes = MagicMock()
+        mock_user32 = MagicMock()
+        mock_ctypes.windll.user32 = mock_user32
+        mock_ctypes.windll.kernel32 = MagicMock()
+
+        mock_user32.GetClipboardData.return_value = 0  # no handle
+
+        with patch.dict("sys.modules", {"ctypes": mock_ctypes, "ctypes.wintypes": MagicMock()}):
+            result = typer._win_clipboard_get()
+
+        assert result == ""
+
+    def test_returns_empty_on_null_ptr(self):
+        mock_ctypes = MagicMock()
+        mock_user32 = MagicMock()
+        mock_kernel32 = MagicMock()
+        mock_ctypes.windll.user32 = mock_user32
+        mock_ctypes.windll.kernel32 = mock_kernel32
+
+        mock_user32.GetClipboardData.return_value = 12345
+        mock_kernel32.GlobalLock.return_value = 0  # null ptr
+
+        with patch.dict("sys.modules", {"ctypes": mock_ctypes, "ctypes.wintypes": MagicMock()}):
+            result = typer._win_clipboard_get()
+
+        assert result == ""
+
+
+class TestWinClipboardSet:
+    def test_sets_clipboard_text(self):
+        mock_ctypes = MagicMock()
+        mock_user32 = MagicMock()
+        mock_kernel32 = MagicMock()
+        mock_ctypes.windll.user32 = mock_user32
+        mock_ctypes.windll.kernel32 = mock_kernel32
+        mock_kernel32.GlobalAlloc.return_value = 99
+        mock_kernel32.GlobalLock.return_value = 100
+
+        with patch.dict("sys.modules", {"ctypes": mock_ctypes, "ctypes.wintypes": MagicMock()}):
+            typer._win_clipboard_set("hello")
+
+        mock_user32.OpenClipboard.assert_called_once_with(0)
+        mock_user32.EmptyClipboard.assert_called_once()
+        mock_user32.SetClipboardData.assert_called_once()
+        mock_user32.CloseClipboard.assert_called_once()
+        mock_kernel32.GlobalUnlock.assert_called_once()
+        mock_ctypes.memmove.assert_called_once()
+
+
+class TestSendCtrlV:
+    def test_send_ctrl_v_calls_keybd_event(self):
+        """Test _send_ctrl_v calls ctypes.windll.user32.keybd_event."""
+        mock_ctypes = MagicMock()
+        mock_user32 = MagicMock()
+        mock_ctypes.windll.user32 = mock_user32
+
+        with patch.dict("sys.modules", {"ctypes": mock_ctypes, "ctypes.wintypes": MagicMock()}):
+            # We need to reload to pick up the mock ctypes
+            typer._send_ctrl_v()
+
+        # keybd_event should be called 4 times:
+        # ctrl down, v down, v up, ctrl up
+        assert mock_user32.keybd_event.call_count == 4
 
 
 # ---------------------------------------------------------------------------

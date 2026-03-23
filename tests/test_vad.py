@@ -197,6 +197,38 @@ class TestProcessChunk:
         assert data is None
         mock_vad_model.assert_not_called()
 
+    def test_max_utterance_cap_flushes(self, mock_vad_model):
+        """Cover lines 186-194: speech exceeding max_speech_s is flushed."""
+        # Use a very short max_speech_s so we hit the cap quickly
+        det = SpeechDetector(
+            sample_rate=16000,
+            threshold=0.5,
+            silence_ms=800,
+            min_speech_ms=250,
+            max_speech_s=0.128,  # 128ms = 4 chunks of 32ms each
+        )
+        det._model_loaded = True
+        assert det.max_speech_chunks == 4
+
+        mock_vad_model.return_value = 0.9  # always speech
+        audio = np.ones(512, dtype=np.float32)
+
+        # Send 4 speech chunks to hit the cap exactly
+        for i in range(3):
+            complete, data = det.process_chunk(audio)
+            assert complete is False
+
+        # The 4th chunk should trigger the max cap flush
+        complete, data = det.process_chunk(audio)
+        assert complete is True
+        assert data is not None
+        # Should contain 4 chunks * 512 samples
+        assert len(data) == 4 * 512
+        # State should be reset
+        assert det._is_speaking is False
+        assert det._speech_count == 0
+        assert len(det._speech_frames) == 0
+
 
 # ---------------------------------------------------------------------------
 # is_speaking property
@@ -244,3 +276,316 @@ class TestModelLoading:
             det._ensure_model()
             det._ensure_model()
             mock_load.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# flush
+# ---------------------------------------------------------------------------
+
+
+class TestFlush:
+    def test_flush_returns_none_when_not_speaking(self):
+        det = SpeechDetector()
+        det._is_speaking = False
+        assert det.flush() is None
+
+    def test_flush_returns_none_when_no_frames(self):
+        det = SpeechDetector()
+        det._is_speaking = True
+        det._speech_frames = []
+        assert det.flush() is None
+
+    def test_flush_returns_audio_when_enough_speech(self):
+        det = SpeechDetector(min_speech_ms=250)
+        det._is_speaking = True
+        det._speech_count = det.min_speech_chunks + 1
+        det._speech_frames = [np.ones(512, dtype=np.float32)]
+
+        result = det.flush()
+        assert result is not None
+        assert len(result) == 512
+        assert not det._is_speaking
+        assert det._speech_count == 0
+        assert len(det._speech_frames) == 0
+
+    def test_flush_returns_none_when_speech_too_short(self):
+        det = SpeechDetector(min_speech_ms=250)
+        det._is_speaking = True
+        det._speech_count = 1  # below min_speech_chunks
+        det._speech_frames = [np.ones(512, dtype=np.float32)]
+
+        result = det.flush()
+        assert result is None
+        assert not det._is_speaking
+
+    def test_flush_concatenates_multiple_frames(self):
+        det = SpeechDetector(min_speech_ms=32)
+        det._is_speaking = True
+        det._speech_count = det.min_speech_chunks + 1
+        det._speech_frames = [
+            np.ones(512, dtype=np.float32),
+            np.ones(512, dtype=np.float32),
+        ]
+
+        result = det.flush()
+        assert result is not None
+        assert len(result) == 1024
+
+
+# ---------------------------------------------------------------------------
+# _load_model — PyTorch path
+# ---------------------------------------------------------------------------
+
+
+class TestLoadModelDoubleCheck:
+    def test_double_checked_locking_returns_early(self):
+        """Cover line 26: _model set between outer check and lock acquisition."""
+        import whisper_dictation.vad as vad_mod
+
+        original_model = vad_mod._model
+        original_lock = vad_mod._model_lock
+        sentinel = MagicMock(name="already_loaded_vad")
+
+        class SetModelOnEnterLock:
+            def __enter__(self_lock):
+                original_lock.__enter__()
+                vad_mod._model = sentinel
+                return self_lock
+
+            def __exit__(self_lock, *args):
+                return original_lock.__exit__(*args)
+
+        try:
+            vad_mod._model = None
+            vad_mod._model_lock = SetModelOnEnterLock()
+            vad_mod._load_model()
+            assert vad_mod._model is sentinel
+        finally:
+            vad_mod._model = original_model
+            vad_mod._model_lock = original_lock
+
+
+class TestLoadModelTorch:
+    def test_load_model_with_torch(self):
+        """Test _load_model when torch is available."""
+        import whisper_dictation.vad as vad_mod
+
+        # Reset globals
+        original_model = vad_mod._model
+        # _get_speech_timestamps removed in refactor
+        vad_mod._model = None
+        # _get_speech_timestamps removed
+
+        try:
+            mock_model = MagicMock()
+            mock_get_timestamps = MagicMock()
+            mock_torch = MagicMock()
+            mock_torch.hub.load.return_value = (mock_model, [mock_get_timestamps, None, None])
+
+            with patch.dict("sys.modules", {"torch": mock_torch}):
+                with patch("builtins.__import__", side_effect=lambda name, *a, **kw: (
+                    mock_torch if name == "torch" else __import__(name, *a, **kw)
+                )):
+                    vad_mod._load_model()
+
+            assert vad_mod._model is mock_model
+            # _get_speech_timestamps removed in refactor
+        finally:
+            vad_mod._model = original_model
+            pass  # _get_speech_timestamps removed
+
+    def test_load_model_already_loaded(self):
+        """Test _load_model short-circuits when model is already loaded."""
+        import whisper_dictation.vad as vad_mod
+
+        original_model = vad_mod._model
+        try:
+            vad_mod._model = MagicMock()  # pretend already loaded
+            with patch("whisper_dictation.vad._load_onnx_model") as mock_onnx:
+                vad_mod._load_model()
+                mock_onnx.assert_not_called()
+        finally:
+            vad_mod._model = original_model
+
+    def test_load_model_torch_import_error_falls_back_to_onnx(self):
+        """Test _load_model falls back to ONNX when torch import fails."""
+        import whisper_dictation.vad as vad_mod
+
+        original_model = vad_mod._model
+        # _get_speech_timestamps removed in refactor
+        vad_mod._model = None
+        # _get_speech_timestamps removed
+
+        try:
+            with patch("whisper_dictation.vad._load_onnx_model") as mock_onnx:
+                # Make torch import raise ImportError
+                real_import = __builtins__.__import__ if hasattr(__builtins__, '__import__') else __import__
+
+                def fake_import(name, *args, **kwargs):
+                    if name == "torch":
+                        raise ImportError("no torch")
+                    return real_import(name, *args, **kwargs)
+
+                with patch("builtins.__import__", side_effect=fake_import):
+                    vad_mod._load_model()
+
+                mock_onnx.assert_called_once()
+        finally:
+            vad_mod._model = original_model
+            pass  # _get_speech_timestamps removed
+
+
+# ---------------------------------------------------------------------------
+# _load_onnx_model
+# ---------------------------------------------------------------------------
+
+
+class TestLoadOnnxModel:
+    def test_load_onnx_model_downloads_when_missing(self, tmp_path):
+        """Test _load_onnx_model downloads model when cache doesn't exist."""
+        import whisper_dictation.vad as vad_mod
+
+        original_model = vad_mod._model
+        vad_mod._model = None
+
+        try:
+            cache_path = tmp_path / "silero_vad.onnx"
+            mock_ort = MagicMock()
+
+            with (
+                patch("whisper_dictation.vad.OnnxVAD") as mock_onnx_vad,
+                patch("platformdirs.user_cache_dir", return_value=str(tmp_path)),
+                patch("urllib.request.urlretrieve") as mock_download,
+                patch.dict("sys.modules", {"onnxruntime": mock_ort}),
+            ):
+                vad_mod._load_onnx_model()
+                mock_download.assert_called_once()
+                mock_onnx_vad.assert_called_once()
+        finally:
+            vad_mod._model = original_model
+
+    def test_load_onnx_model_uses_cached(self, tmp_path):
+        """Test _load_onnx_model skips download when cache exists."""
+        import whisper_dictation.vad as vad_mod
+
+        original_model = vad_mod._model
+        vad_mod._model = None
+
+        try:
+            # Create a fake cached model file
+            cache_dir = tmp_path / "whisper-dictation"
+            cache_dir.mkdir()
+            (cache_dir / "silero_vad.onnx").write_text("fake")
+
+            mock_ort = MagicMock()
+
+            with (
+                patch("whisper_dictation.vad.OnnxVAD") as mock_onnx_vad,
+                patch("platformdirs.user_cache_dir", return_value=str(cache_dir)),
+                patch("urllib.request.urlretrieve") as mock_download,
+                patch.dict("sys.modules", {"onnxruntime": mock_ort}),
+            ):
+                vad_mod._load_onnx_model()
+                mock_download.assert_not_called()
+        finally:
+            vad_mod._model = original_model
+
+
+# ---------------------------------------------------------------------------
+# OnnxVAD class
+# ---------------------------------------------------------------------------
+
+
+class TestOnnxVAD:
+    def test_init(self):
+        """Test OnnxVAD initialization."""
+        mock_ort = MagicMock()
+        mock_session = MagicMock()
+        mock_ort.SessionOptions.return_value = MagicMock()
+        mock_ort.InferenceSession.return_value = mock_session
+
+        with patch.dict("sys.modules", {"onnxruntime": mock_ort}):
+            from whisper_dictation.vad import OnnxVAD
+            vad = OnnxVAD.__new__(OnnxVAD)
+            # Manually call __init__ with mocked ort
+            with patch("builtins.__import__", side_effect=lambda name, *a, **kw: (
+                mock_ort if name == "onnxruntime" else __import__(name, *a, **kw)
+            )):
+                vad.__init__("fake_model.onnx")
+
+            assert vad.session is mock_session
+            assert vad._h.shape == (2, 1, 64)
+            assert vad._c.shape == (2, 1, 64)
+
+    def test_reset_states(self):
+        """Test OnnxVAD.reset_states zeros out hidden states."""
+        from whisper_dictation.vad import OnnxVAD
+        vad = OnnxVAD.__new__(OnnxVAD)
+        vad._h = np.ones((2, 1, 64), dtype=np.float32)
+        vad._c = np.ones((2, 1, 64), dtype=np.float32)
+        vad.reset_states()
+        np.testing.assert_array_equal(vad._h, np.zeros((2, 1, 64), dtype=np.float32))
+        np.testing.assert_array_equal(vad._c, np.zeros((2, 1, 64), dtype=np.float32))
+
+    def test_call_float32_input(self):
+        """Test OnnxVAD __call__ with float32 input."""
+        from whisper_dictation.vad import OnnxVAD
+        vad = OnnxVAD.__new__(OnnxVAD)
+        vad._h = np.zeros((2, 1, 64), dtype=np.float32)
+        vad._c = np.zeros((2, 1, 64), dtype=np.float32)
+        vad._sr = np.array(16000, dtype=np.int64)
+
+        mock_session = MagicMock()
+        new_h = np.zeros((2, 1, 64), dtype=np.float32)
+        new_c = np.zeros((2, 1, 64), dtype=np.float32)
+        mock_session.run.return_value = [np.array([[0.85]]), new_h, new_c]
+        vad.session = mock_session
+
+        audio = np.zeros(512, dtype=np.float32)
+        result = vad(audio, 16000)
+
+        assert result == pytest.approx(0.85)
+        mock_session.run.assert_called_once()
+        # Verify input was reshaped to 2D
+        call_inputs = mock_session.run.call_args[0][1]
+        assert call_inputs["input"].ndim == 2
+
+    def test_call_int16_input_converted(self):
+        """Test OnnxVAD __call__ converts int16 to float32."""
+        from whisper_dictation.vad import OnnxVAD
+        vad = OnnxVAD.__new__(OnnxVAD)
+        vad._h = np.zeros((2, 1, 64), dtype=np.float32)
+        vad._c = np.zeros((2, 1, 64), dtype=np.float32)
+        vad._sr = np.array(16000, dtype=np.int64)
+
+        mock_session = MagicMock()
+        new_h = np.zeros((2, 1, 64), dtype=np.float32)
+        new_c = np.zeros((2, 1, 64), dtype=np.float32)
+        mock_session.run.return_value = [np.array([[0.5]]), new_h, new_c]
+        vad.session = mock_session
+
+        audio = np.zeros(512, dtype=np.int16)
+        result = vad(audio, 16000)
+
+        assert result == pytest.approx(0.5)
+        call_inputs = mock_session.run.call_args[0][1]
+        assert call_inputs["input"].dtype == np.float32
+
+    def test_call_updates_hidden_states(self):
+        """Test OnnxVAD __call__ updates _h and _c from session output."""
+        from whisper_dictation.vad import OnnxVAD
+        vad = OnnxVAD.__new__(OnnxVAD)
+        vad._h = np.zeros((2, 1, 64), dtype=np.float32)
+        vad._c = np.zeros((2, 1, 64), dtype=np.float32)
+        vad._sr = np.array(16000, dtype=np.int64)
+
+        mock_session = MagicMock()
+        new_h = np.ones((2, 1, 64), dtype=np.float32)
+        new_c = np.ones((2, 1, 64), dtype=np.float32) * 2
+        mock_session.run.return_value = [np.array([[0.7]]), new_h, new_c]
+        vad.session = mock_session
+
+        vad(np.zeros(512, dtype=np.float32), 16000)
+
+        np.testing.assert_array_equal(vad._h, new_h)
+        np.testing.assert_array_equal(vad._c, new_c)

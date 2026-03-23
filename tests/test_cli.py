@@ -12,10 +12,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from whisper_dictation.cli import (
+    _DEFAULT_CONFIG_TEMPLATE,
     _cleanup_pid,
     _read_pid,
     _setup_logging,
     _write_pid,
+    cmd_config,
     cmd_devices,
     cmd_start,
     cmd_status,
@@ -109,6 +111,87 @@ class TestPidManagement:
             # Should not raise
             _cleanup_pid()
 
+    def test_write_pid_lock_already_held(self, tmp_path):
+        """Test _write_pid exits when flock raises OSError (lock held by another)."""
+        pid_file = tmp_path / "daemon.pid"
+        mock_fcntl = MagicMock()
+        mock_fcntl.LOCK_EX = 2
+        mock_fcntl.LOCK_NB = 4
+        mock_fcntl.flock.side_effect = OSError("lock held")
+
+        with (
+            patch("whisper_dictation.cli.CONFIG_DIR", tmp_path),
+            patch("whisper_dictation.cli.PID_FILE", pid_file),
+            patch.dict("sys.modules", {"fcntl": mock_fcntl}),
+            patch("os.open", return_value=42),
+            patch("os.close") as mock_close,
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            _write_pid()
+
+        assert exc_info.value.code == 1
+        mock_close.assert_called_once_with(42)
+
+    def test_write_pid_no_fcntl_fallback(self, tmp_path):
+        """Test _write_pid falls back to simple write when fcntl is unavailable."""
+        pid_file = tmp_path / "daemon.pid"
+
+        # Make fcntl import raise ImportError inside _write_pid
+        import builtins
+        real_import = builtins.__import__
+
+        def fake_import(name, *args, **kwargs):
+            if name == "fcntl":
+                raise ImportError("no fcntl")
+            return real_import(name, *args, **kwargs)
+
+        with (
+            patch("whisper_dictation.cli.CONFIG_DIR", tmp_path),
+            patch("whisper_dictation.cli.PID_FILE", pid_file),
+            patch("builtins.__import__", side_effect=fake_import),
+        ):
+            _write_pid()
+
+        assert pid_file.exists()
+        assert int(pid_file.read_text()) == os.getpid()
+
+    def test_cleanup_pid_closes_lock_fd(self, tmp_path):
+        """Test _cleanup_pid closes the lock fd when _write_pid._lock_fd is set."""
+        pid_file = tmp_path / "daemon.pid"
+        state_file = tmp_path / "state.json"
+        pid_file.write_text("123")
+
+        # Set _lock_fd on _write_pid
+        _write_pid._lock_fd = 42
+
+        with (
+            patch("whisper_dictation.cli.PID_FILE", pid_file),
+            patch("whisper_dictation.cli.STATE_FILE", state_file),
+            patch("os.close") as mock_close,
+        ):
+            _cleanup_pid()
+
+        mock_close.assert_called_once_with(42)
+        assert _write_pid._lock_fd is None
+
+    def test_cleanup_pid_close_oserror_suppressed(self, tmp_path):
+        """Test _cleanup_pid suppresses OSError when closing lock fd."""
+        pid_file = tmp_path / "daemon.pid"
+        state_file = tmp_path / "state.json"
+        pid_file.write_text("123")
+
+        _write_pid._lock_fd = 42
+
+        with (
+            patch("whisper_dictation.cli.PID_FILE", pid_file),
+            patch("whisper_dictation.cli.STATE_FILE", state_file),
+            patch("os.close", side_effect=OSError("bad fd")),
+        ):
+            # Should not raise
+            _cleanup_pid()
+
+        assert _write_pid._lock_fd is None
+
 
 # ---------------------------------------------------------------------------
 # cmd_stop
@@ -187,6 +270,23 @@ class TestCmdStatus:
         assert "12345" in captured.out
         assert "toggle" in captured.out
         assert "alt+v" in captured.out
+
+    def test_status_running_corrupt_state_file(self, tmp_path, capsys):
+        """Test status command when state file has corrupt JSON (covers except Exception: pass)."""
+        pid_file = tmp_path / "daemon.pid"
+        state_file = tmp_path / "state.json"
+        state_file.write_text("not valid json{{{")
+
+        with (
+            patch("whisper_dictation.cli.PID_FILE", pid_file),
+            patch("whisper_dictation.cli.STATE_FILE", state_file),
+            patch("whisper_dictation.cli._read_pid", return_value=12345),
+        ):
+            cmd_status(MagicMock())
+
+        captured = capsys.readouterr()
+        assert "running" in captured.out
+        assert "12345" in captured.out
 
     def test_status_running_no_state_file(self, tmp_path, capsys):
         pid_file = tmp_path / "daemon.pid"
@@ -273,6 +373,184 @@ class TestCmdStart:
         ):
             cmd_start(args)
 
+    def test_start_with_mode_override(self, tmp_path):
+        from whisper_dictation.config import Config
+
+        mock_daemon = MagicMock()
+
+        args = MagicMock()
+        args.config = None
+        args.mode = "hold"
+        args.hotkey = None
+        args.engine = None
+        args.server_url = None
+
+        with (
+            patch("whisper_dictation.cli._read_pid", return_value=None),
+            patch("whisper_dictation.cli.load_config", return_value=Config()),
+            patch("whisper_dictation.daemon.DictationDaemon", return_value=mock_daemon) as mock_cls,
+            patch("whisper_dictation.cli._write_pid"),
+            patch("whisper_dictation.cli._cleanup_pid"),
+            patch("whisper_dictation.cli.CONFIG_DIR", tmp_path),
+            patch("whisper_dictation.cli.STATE_FILE", tmp_path / "state.json"),
+            patch("signal.signal"),
+        ):
+            cmd_start(args)
+
+        # Verify mode was overridden
+        config_passed = mock_cls.call_args[0][0]
+        assert config_passed.hotkey.mode == "hold"
+
+    def test_start_with_hotkey_override(self, tmp_path):
+        from whisper_dictation.config import Config
+
+        mock_daemon = MagicMock()
+
+        args = MagicMock()
+        args.config = None
+        args.mode = None
+        args.hotkey = "ctrl+d"
+        args.engine = None
+        args.server_url = None
+
+        with (
+            patch("whisper_dictation.cli._read_pid", return_value=None),
+            patch("whisper_dictation.cli.load_config", return_value=Config()),
+            patch("whisper_dictation.daemon.DictationDaemon", return_value=mock_daemon) as mock_cls,
+            patch("whisper_dictation.cli._write_pid"),
+            patch("whisper_dictation.cli._cleanup_pid"),
+            patch("whisper_dictation.cli.CONFIG_DIR", tmp_path),
+            patch("whisper_dictation.cli.STATE_FILE", tmp_path / "state.json"),
+            patch("signal.signal"),
+        ):
+            cmd_start(args)
+
+        config_passed = mock_cls.call_args[0][0]
+        assert config_passed.hotkey.binding == "ctrl+d"
+
+    def test_start_with_engine_override(self, tmp_path):
+        from whisper_dictation.config import Config
+
+        mock_daemon = MagicMock()
+
+        args = MagicMock()
+        args.config = None
+        args.mode = None
+        args.hotkey = None
+        args.engine = "local"
+        args.server_url = None
+
+        with (
+            patch("whisper_dictation.cli._read_pid", return_value=None),
+            patch("whisper_dictation.cli.load_config", return_value=Config()),
+            patch("whisper_dictation.daemon.DictationDaemon", return_value=mock_daemon) as mock_cls,
+            patch("whisper_dictation.cli._write_pid"),
+            patch("whisper_dictation.cli._cleanup_pid"),
+            patch("whisper_dictation.cli.CONFIG_DIR", tmp_path),
+            patch("whisper_dictation.cli.STATE_FILE", tmp_path / "state.json"),
+            patch("signal.signal"),
+        ):
+            cmd_start(args)
+
+        config_passed = mock_cls.call_args[0][0]
+        assert config_passed.engine.type == "local"
+
+    def test_start_with_server_url_override(self, tmp_path):
+        from whisper_dictation.config import Config
+
+        mock_daemon = MagicMock()
+
+        args = MagicMock()
+        args.config = None
+        args.mode = None
+        args.hotkey = None
+        args.engine = None
+        args.server_url = "http://custom:9000"
+
+        with (
+            patch("whisper_dictation.cli._read_pid", return_value=None),
+            patch("whisper_dictation.cli.load_config", return_value=Config()),
+            patch("whisper_dictation.daemon.DictationDaemon", return_value=mock_daemon) as mock_cls,
+            patch("whisper_dictation.cli._write_pid"),
+            patch("whisper_dictation.cli._cleanup_pid"),
+            patch("whisper_dictation.cli.CONFIG_DIR", tmp_path),
+            patch("whisper_dictation.cli.STATE_FILE", tmp_path / "state.json"),
+            patch("signal.signal"),
+        ):
+            cmd_start(args)
+
+        config_passed = mock_cls.call_args[0][0]
+        assert config_passed.server.url == "http://custom:9000"
+
+    def test_start_successful_daemon_wait(self, tmp_path):
+        """Test cmd_start successful path where daemon.wait() returns normally."""
+        from whisper_dictation.config import Config
+
+        mock_daemon = MagicMock()
+
+        args = MagicMock()
+        args.config = None
+        args.mode = None
+        args.hotkey = None
+        args.engine = None
+        args.server_url = None
+
+        with (
+            patch("whisper_dictation.cli._read_pid", return_value=None),
+            patch("whisper_dictation.cli.load_config", return_value=Config()),
+            patch("whisper_dictation.daemon.DictationDaemon", return_value=mock_daemon) as mock_cls,
+            patch("whisper_dictation.cli._write_pid"),
+            patch("whisper_dictation.cli._cleanup_pid") as mock_cleanup,
+            patch("whisper_dictation.cli.CONFIG_DIR", tmp_path),
+            patch("whisper_dictation.cli.STATE_FILE", tmp_path / "state.json"),
+            patch("signal.signal"),
+        ):
+            cmd_start(args)
+
+        mock_daemon.start.assert_called_once()
+        mock_daemon.wait.assert_called_once()
+        mock_cleanup.assert_called()
+
+    def test_start_signal_handler_calls_shutdown(self, tmp_path):
+        """Test that the registered signal handler calls daemon.stop and sys.exit."""
+        from whisper_dictation.config import Config
+
+        mock_daemon = MagicMock()
+        registered_handlers = {}
+
+        def capture_signal(sig, handler):
+            registered_handlers[sig] = handler
+
+        args = MagicMock()
+        args.config = None
+        args.mode = None
+        args.hotkey = None
+        args.engine = None
+        args.server_url = None
+
+        with (
+            patch("whisper_dictation.cli._read_pid", return_value=None),
+            patch("whisper_dictation.cli.load_config", return_value=Config()),
+            patch("whisper_dictation.daemon.DictationDaemon", return_value=mock_daemon),
+            patch("whisper_dictation.cli._write_pid"),
+            patch("whisper_dictation.cli._cleanup_pid"),
+            patch("whisper_dictation.cli.CONFIG_DIR", tmp_path),
+            patch("whisper_dictation.cli.STATE_FILE", tmp_path / "state.json"),
+            patch("signal.signal", side_effect=capture_signal),
+        ):
+            cmd_start(args)
+
+        # Verify SIGTERM handler was registered
+        assert signal.SIGTERM in registered_handlers
+        handler = registered_handlers[signal.SIGTERM]
+
+        # Call the handler and verify it calls daemon.stop and sys.exit
+        mock_daemon.reset_mock()
+        with pytest.raises(SystemExit) as exc_info:
+            handler(signal.SIGTERM, None)
+        assert exc_info.value.code == 0
+        mock_daemon.stop.assert_called_once()
+
 
 # ---------------------------------------------------------------------------
 # cmd_transcribe
@@ -319,6 +597,126 @@ class TestCmdTranscribe:
         with (
             patch("whisper_dictation.cli.load_config", return_value=Config()),
             patch("whisper_dictation.engine.server.ServerEngine", return_value=mock_engine),
+        ):
+            cmd_transcribe(args)
+        mock_engine.transcribe.assert_called_once()
+
+    def test_transcribe_with_record(self, tmp_path, capsys):
+        import numpy as np
+
+        from whisper_dictation.config import Config
+
+        mock_engine = MagicMock()
+        mock_engine.transcribe.return_value = "recorded speech"
+
+        mock_sd = MagicMock()
+        mock_audio = np.zeros((16000, 1), dtype=np.float32)
+        mock_sd.rec.return_value = mock_audio
+
+        args = MagicMock()
+        args.config = None
+        args.server_url = None
+        args.engine = None
+        args.file = None
+        args.record = 1.0
+
+        with (
+            patch("whisper_dictation.cli.load_config", return_value=Config()),
+            patch("whisper_dictation.engine.server.ServerEngine", return_value=mock_engine),
+            patch.dict("sys.modules", {"sounddevice": mock_sd}),
+        ):
+            cmd_transcribe(args)
+
+        captured = capsys.readouterr()
+        assert "recorded speech" in captured.out
+
+    def test_transcribe_record_no_speech(self, tmp_path):
+        import numpy as np
+
+        from whisper_dictation.config import Config
+
+        mock_engine = MagicMock()
+        mock_engine.transcribe.return_value = ""
+
+        mock_sd = MagicMock()
+        mock_audio = np.zeros((16000, 1), dtype=np.float32)
+        mock_sd.rec.return_value = mock_audio
+
+        args = MagicMock()
+        args.config = None
+        args.server_url = None
+        args.engine = None
+        args.file = None
+        args.record = 1.0
+
+        with (
+            patch("whisper_dictation.cli.load_config", return_value=Config()),
+            patch("whisper_dictation.engine.server.ServerEngine", return_value=mock_engine),
+            patch.dict("sys.modules", {"sounddevice": mock_sd}),
+            pytest.raises(SystemExit),
+        ):
+            cmd_transcribe(args)
+
+    def test_transcribe_with_server_url_override(self, tmp_path):
+        import wave
+        import numpy as np
+
+        from whisper_dictation.config import Config
+
+        wav_path = tmp_path / "test.wav"
+        audio = np.zeros(16000, dtype=np.int16)
+        with wave.open(str(wav_path), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(16000)
+            w.writeframes(audio.tobytes())
+
+        mock_engine = MagicMock()
+        mock_engine.transcribe.return_value = "hello"
+
+        args = MagicMock()
+        args.config = None
+        args.server_url = "http://custom:9000"
+        args.engine = None
+        args.file = str(wav_path)
+        args.record = None
+
+        with (
+            patch("whisper_dictation.cli.load_config", return_value=Config()),
+            patch("whisper_dictation.engine.server.ServerEngine", return_value=mock_engine) as mock_cls,
+        ):
+            cmd_transcribe(args)
+        # Verify server URL was overridden
+        call_args = mock_cls.call_args[0][0]
+        assert call_args.url == "http://custom:9000"
+
+    def test_transcribe_with_engine_override(self, tmp_path):
+        import wave
+        import numpy as np
+
+        from whisper_dictation.config import Config
+
+        wav_path = tmp_path / "test.wav"
+        audio = np.zeros(16000, dtype=np.int16)
+        with wave.open(str(wav_path), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(16000)
+            w.writeframes(audio.tobytes())
+
+        mock_engine = MagicMock()
+        mock_engine.transcribe.return_value = "hello"
+
+        args = MagicMock()
+        args.config = None
+        args.server_url = None
+        args.engine = "local"
+        args.file = str(wav_path)
+        args.record = None
+
+        with (
+            patch("whisper_dictation.cli.load_config", return_value=Config()),
+            patch("whisper_dictation.engine.local.LocalEngine", return_value=mock_engine),
         ):
             cmd_transcribe(args)
         mock_engine.transcribe.assert_called_once()
@@ -433,3 +831,132 @@ class TestMain:
             main()
             args = mock_trans.call_args[0][0]
             assert args.record == 5.0
+
+    def test_config_subcommand(self):
+        with (
+            patch("sys.argv", ["prog", "config"]),
+            patch("whisper_dictation.cli.cmd_config") as mock_config,
+            patch("whisper_dictation.cli._setup_logging"),
+        ):
+            main()
+            mock_config.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# cmd_config
+# ---------------------------------------------------------------------------
+
+
+class TestCmdConfig:
+    def test_generate_creates_file(self, tmp_path, capsys):
+        config_dir = tmp_path / "config"
+        config_file = config_dir / "config.toml"
+
+        args = MagicMock()
+        args.generate = True
+        args.force = False
+        args.path = False
+
+        with (
+            patch("whisper_dictation.cli.CONFIG_DIR", config_dir),
+            patch("whisper_dictation.cli.CONFIG_FILE", config_file),
+        ):
+            cmd_config(args)
+
+        assert config_file.exists()
+        content = config_file.read_text()
+        assert "[server]" in content
+        assert "[hotkey]" in content
+        captured = capsys.readouterr()
+        assert "Config written to" in captured.out
+
+    def test_generate_refuses_overwrite(self, tmp_path):
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("existing")
+
+        args = MagicMock()
+        args.generate = True
+        args.force = False
+        args.path = False
+
+        with (
+            patch("whisper_dictation.cli.CONFIG_DIR", tmp_path),
+            patch("whisper_dictation.cli.CONFIG_FILE", config_file),
+            pytest.raises(SystemExit),
+        ):
+            cmd_config(args)
+
+    def test_generate_force_overwrites(self, tmp_path, capsys):
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("old")
+
+        args = MagicMock()
+        args.generate = True
+        args.force = True
+        args.path = False
+
+        with (
+            patch("whisper_dictation.cli.CONFIG_DIR", tmp_path),
+            patch("whisper_dictation.cli.CONFIG_FILE", config_file),
+        ):
+            cmd_config(args)
+
+        assert "[server]" in config_file.read_text()
+
+    def test_path_prints_config_path(self, tmp_path, capsys):
+        config_file = tmp_path / "config.toml"
+
+        args = MagicMock()
+        args.generate = False
+        args.force = False
+        args.path = True
+
+        with patch("whisper_dictation.cli.CONFIG_FILE", config_file):
+            cmd_config(args)
+
+        captured = capsys.readouterr()
+        assert str(config_file) in captured.out
+
+    def test_show_displays_config(self, tmp_path, capsys):
+        config_file = tmp_path / "config.toml"
+
+        args = MagicMock()
+        args.generate = False
+        args.force = False
+        args.path = False
+
+        from whisper_dictation.config import Config
+
+        with (
+            patch("whisper_dictation.cli.CONFIG_FILE", config_file),
+            patch("whisper_dictation.cli.load_config", return_value=Config()),
+        ):
+            cmd_config(args)
+
+        captured = capsys.readouterr()
+        assert "[server]" in captured.out
+        assert "[hotkey]" in captured.out
+        assert "[vad]" in captured.out
+        assert "[audio]" in captured.out
+        assert "[engine]" in captured.out
+        assert "not found" in captured.out
+
+    def test_show_with_existing_config(self, tmp_path, capsys):
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("[server]\nurl = 'http://x'\n")
+
+        args = MagicMock()
+        args.generate = False
+        args.force = False
+        args.path = False
+
+        from whisper_dictation.config import Config
+
+        with (
+            patch("whisper_dictation.cli.CONFIG_FILE", config_file),
+            patch("whisper_dictation.cli.load_config", return_value=Config()),
+        ):
+            cmd_config(args)
+
+        captured = capsys.readouterr()
+        assert "exists" in captured.out

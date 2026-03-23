@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 
 import numpy as np
 
@@ -17,6 +18,7 @@ class LocalEngine(TranscriptionEngine):
 
     def __init__(self, server_config: ServerConfig, engine_config: EngineConfig):
         self._model = None
+        self._model_lock = threading.Lock()
         self._model_name = server_config.model
         self._language = server_config.language
         self._compute_type = engine_config.compute_type
@@ -26,36 +28,40 @@ class LocalEngine(TranscriptionEngine):
         if self._model is not None:
             return
 
-        try:
-            from faster_whisper import WhisperModel
-        except ImportError:
-            raise RuntimeError(
-                "faster-whisper not installed. "
-                "Install with: pip install 'whisper-dictation[local]'"
-            )
+        with self._model_lock:
+            if self._model is not None:
+                return  # double-checked locking
 
-        device = self._device
-        compute_type = self._compute_type
-
-        if device == "auto":
             try:
-                import torch
-                device = "cuda" if torch.cuda.is_available() else "cpu"
+                from faster_whisper import WhisperModel
             except ImportError:
-                device = "cpu"
+                raise RuntimeError(
+                    "faster-whisper not installed. "
+                    "Install with: pip install 'whisper-dictation[local]'"
+                )
 
-        if compute_type == "auto":
-            compute_type = "float16" if device == "cuda" else "int8"
+            device = self._device
+            compute_type = self._compute_type
 
-        log.info(
-            "Loading model %s on %s (%s)...",
-            self._model_name, device, compute_type,
-        )
-        self._model = WhisperModel(
-            self._model_name,
-            device=device,
-            compute_type=compute_type,
-        )
+            if device == "auto":
+                try:
+                    import torch
+                    device = "cuda" if torch.cuda.is_available() else "cpu"
+                except ImportError:
+                    device = "cpu"
+
+            if compute_type == "auto":
+                compute_type = "float16" if device == "cuda" else "int8"
+
+            log.info(
+                "Loading model %s on %s (%s)...",
+                self._model_name, device, compute_type,
+            )
+            self._model = WhisperModel(
+                self._model_name,
+                device=device,
+                compute_type=compute_type,
+            )
         log.info("Model loaded")
 
     def transcribe(self, audio: np.ndarray, sample_rate: int = 16000) -> str:

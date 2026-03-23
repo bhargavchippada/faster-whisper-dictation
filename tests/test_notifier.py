@@ -76,6 +76,20 @@ class TestNotifyWindows:
                     notify("Win Title", "Win Body")
 
     @patch("whisper_dictation.notifier.sys")
+    def test_plyer_notify_raises_exception(self, mock_sys):
+        """Test Windows path when plyer.notification.notify raises (covers lines 39-40)."""
+        mock_sys.platform = "win32"
+        mock_plyer_notification = MagicMock()
+        mock_plyer_notification.notify.side_effect = RuntimeError("plyer crashed")
+
+        with patch.dict("sys.modules", {
+            "plyer": MagicMock(notification=mock_plyer_notification),
+            "plyer.notification": mock_plyer_notification,
+        }):
+            # Should not raise - exception should be caught
+            notify("Win Title", "Win Body")
+
+    @patch("whisper_dictation.notifier.sys")
     def test_plyer_import_error_handled(self, mock_sys):
         mock_sys.platform = "win32"
         # If plyer is not installed, the import will fail but should be caught

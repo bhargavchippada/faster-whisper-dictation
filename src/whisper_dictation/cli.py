@@ -9,7 +9,62 @@ import os
 import signal
 import sys
 
-from .config import CONFIG_DIR, PID_FILE, STATE_FILE, load_config
+from pathlib import Path
+
+from .config import (
+    AudioConfig,
+    Config,
+    CONFIG_DIR,
+    CONFIG_FILE,
+    EngineConfig,
+    HotkeyConfig,
+    PID_FILE,
+    ServerConfig,
+    STATE_FILE,
+    VADConfig,
+    load_config,
+)
+
+
+def _apply_cli_overrides(
+    config: Config,
+    *,
+    mode: str | None = None,
+    hotkey: str | None = None,
+    engine: str | None = None,
+    server_url: str | None = None,
+) -> Config:
+    """Apply CLI flag overrides to a config, returning a new Config."""
+    hotkey_cfg = config.hotkey
+    if mode:
+        hotkey_cfg = HotkeyConfig(binding=hotkey_cfg.binding, mode=mode)
+    if hotkey:
+        hotkey_cfg = HotkeyConfig(binding=hotkey, mode=hotkey_cfg.mode)
+
+    engine_cfg = config.engine
+    if engine:
+        engine_cfg = EngineConfig(
+            type=engine,
+            compute_type=engine_cfg.compute_type,
+            device=engine_cfg.device,
+        )
+
+    server_cfg = config.server
+    if server_url:
+        server_cfg = ServerConfig(
+            url=server_url,
+            model=server_cfg.model,
+            language=server_cfg.language,
+            timeout=server_cfg.timeout,
+        )
+
+    return Config(
+        server=server_cfg,
+        hotkey=hotkey_cfg,
+        vad=config.vad,
+        audio=config.audio,
+        engine=engine_cfg,
+    )
 
 
 def _setup_logging(verbose: bool = False) -> None:
@@ -22,15 +77,31 @@ def _setup_logging(verbose: bool = False) -> None:
 
 
 def _write_pid() -> None:
+    """Write current PID to file with an exclusive lock to prevent races."""
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    PID_FILE.write_text(str(os.getpid()))
+    try:
+        import fcntl
+
+        fd = os.open(str(PID_FILE), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(fd)
+            print("Daemon already running (lock held).", file=sys.stderr)
+            sys.exit(1)
+        os.write(fd, str(os.getpid()).encode())
+        os.fsync(fd)
+        # Keep fd open to hold the lock for the daemon's lifetime
+        _write_pid._lock_fd = fd
+    except ImportError:
+        # fcntl not available (Windows) — fall back to simple write
+        PID_FILE.write_text(str(os.getpid()))
 
 
 def _read_pid() -> int | None:
     if PID_FILE.exists():
         try:
             pid = int(PID_FILE.read_text().strip())
-            # Check if process is alive
             os.kill(pid, 0)
             return pid
         except (ValueError, ProcessLookupError, PermissionError):
@@ -39,6 +110,14 @@ def _read_pid() -> int | None:
 
 
 def _cleanup_pid() -> None:
+    # Release the lock fd if held
+    fd = getattr(_write_pid, "_lock_fd", None)
+    if fd is not None:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        _write_pid._lock_fd = None
     PID_FILE.unlink(missing_ok=True)
     STATE_FILE.unlink(missing_ok=True)
 
@@ -53,55 +132,13 @@ def cmd_start(args) -> None:
         sys.exit(1)
 
     config = load_config(args.config)
-
-    # CLI overrides
-    if args.mode:
-        config = config.__class__(
-            server=config.server,
-            hotkey=config.hotkey.__class__(
-                binding=config.hotkey.binding,
-                mode=args.mode,
-            ),
-            vad=config.vad,
-            audio=config.audio,
-            engine=config.engine,
-        )
-    if args.hotkey:
-        config = config.__class__(
-            server=config.server,
-            hotkey=config.hotkey.__class__(
-                binding=args.hotkey,
-                mode=config.hotkey.mode,
-            ),
-            vad=config.vad,
-            audio=config.audio,
-            engine=config.engine,
-        )
-    if args.engine:
-        config = config.__class__(
-            server=config.server,
-            hotkey=config.hotkey,
-            vad=config.vad,
-            audio=config.audio,
-            engine=config.engine.__class__(
-                type=args.engine,
-                compute_type=config.engine.compute_type,
-                device=config.engine.device,
-            ),
-        )
-    if args.server_url:
-        config = config.__class__(
-            server=config.server.__class__(
-                url=args.server_url,
-                model=config.server.model,
-                language=config.server.language,
-                timeout=config.server.timeout,
-            ),
-            hotkey=config.hotkey,
-            vad=config.vad,
-            audio=config.audio,
-            engine=config.engine,
-        )
+    config = _apply_cli_overrides(
+        config,
+        mode=args.mode,
+        hotkey=args.hotkey,
+        engine=args.engine,
+        server_url=args.server_url,
+    )
 
     _write_pid()
 
@@ -171,6 +208,85 @@ def cmd_status(args) -> None:
             pass
 
 
+_DEFAULT_CONFIG_TEMPLATE = """\
+# faster-whisper-dictation configuration
+# See: https://github.com/bhargavchippada/faster-whisper-dictation
+
+[server]
+url = "http://localhost:10300"        # Whisper server URL
+model = "Systran/faster-whisper-large-v3"
+language = "en"                       # Language code (e.g. "en", "es", "de")
+timeout = 10                          # Request timeout in seconds
+
+[hotkey]
+binding = "alt+v"                     # Hotkey combo (e.g. "alt+v", "ctrl+shift+d")
+mode = "toggle"                       # "toggle" (press to start/stop) or "hold" (hold to speak)
+
+[vad]
+threshold = 0.5                       # Speech detection sensitivity (0.0-1.0, lower = more sensitive)
+silence_ms = 800                      # How long to wait after speech stops before transcribing (ms)
+min_speech_ms = 250                   # Ignore utterances shorter than this (ms)
+max_speech_s = 90.0                   # Maximum single utterance length (seconds)
+
+[audio]
+sample_rate = 16000                   # Sample rate in Hz (16000 is optimal for Whisper)
+channels = 1                          # Number of audio channels (1 = mono)
+# device = "fifine Microphone"        # Uncomment to use a specific mic (see: faster-whisper-dictation devices)
+
+[engine]
+type = "server"                       # "server" (Docker/remote) or "local" (built-in faster-whisper)
+compute_type = "auto"                 # "auto", "float16" (GPU), "int8" (CPU)
+device = "auto"                       # "auto", "cuda", "cpu"
+"""
+
+
+def cmd_config(args) -> None:
+    """Show current config or generate a default config file."""
+    if args.generate:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        if CONFIG_FILE.exists() and not args.force:
+            print(f"Config already exists: {CONFIG_FILE}", file=sys.stderr)
+            print("Use --force to overwrite.", file=sys.stderr)
+            sys.exit(1)
+        CONFIG_FILE.write_text(_DEFAULT_CONFIG_TEMPLATE)
+        print(f"Config written to: {CONFIG_FILE}")
+        return
+
+    if args.path:
+        print(CONFIG_FILE)
+        return
+
+    # Show current effective config
+    config = load_config()
+    print(f"Config file: {CONFIG_FILE} ({'exists' if CONFIG_FILE.exists() else 'not found'})")
+    print()
+    print(f"[server]")
+    print(f"  url          = {config.server.url}")
+    print(f"  model        = {config.server.model}")
+    print(f"  language     = {config.server.language}")
+    print(f"  timeout      = {config.server.timeout}s")
+    print()
+    print(f"[hotkey]")
+    print(f"  binding      = {config.hotkey.binding}")
+    print(f"  mode         = {config.hotkey.mode}")
+    print()
+    print(f"[vad]")
+    print(f"  threshold    = {config.vad.threshold}")
+    print(f"  silence_ms   = {config.vad.silence_ms}ms")
+    print(f"  min_speech   = {config.vad.min_speech_ms}ms")
+    print(f"  max_speech   = {config.vad.max_speech_s}s")
+    print()
+    print(f"[audio]")
+    print(f"  sample_rate  = {config.audio.sample_rate}Hz")
+    print(f"  channels     = {config.audio.channels}")
+    print(f"  device       = {config.audio.device or '(system default)'}")
+    print()
+    print(f"[engine]")
+    print(f"  type         = {config.engine.type}")
+    print(f"  compute_type = {config.engine.compute_type}")
+    print(f"  device       = {config.engine.device}")
+
+
 def cmd_devices(args) -> None:
     """List available audio input devices."""
     from .audio import list_devices
@@ -191,33 +307,11 @@ def cmd_transcribe(args) -> None:
     import numpy as np
 
     config = load_config(args.config)
-
-    if args.server_url:
-        config = config.__class__(
-            server=config.server.__class__(
-                url=args.server_url,
-                model=config.server.model,
-                language=config.server.language,
-                timeout=config.server.timeout,
-            ),
-            hotkey=config.hotkey,
-            vad=config.vad,
-            audio=config.audio,
-            engine=config.engine,
-        )
-
-    if args.engine:
-        config = config.__class__(
-            server=config.server,
-            hotkey=config.hotkey,
-            vad=config.vad,
-            audio=config.audio,
-            engine=config.engine.__class__(
-                type=args.engine,
-                compute_type=config.engine.compute_type,
-                device=config.engine.device,
-            ),
-        )
+    config = _apply_cli_overrides(
+        config,
+        engine=args.engine,
+        server_url=args.server_url,
+    )
 
     from .engine.server import ServerEngine
 
@@ -281,7 +375,7 @@ def main() -> None:
     p_start.add_argument("--hotkey", help="hotkey binding (e.g. 'alt+v', 'ctrl+shift+d')")
     p_start.add_argument("--engine", choices=["server", "local"], help="transcription engine")
     p_start.add_argument("--server-url", help="whisper server URL")
-    p_start.add_argument("--config", type=lambda p: __import__("pathlib").Path(p), help="config file path")
+    p_start.add_argument("--config", type=Path, help="config file path")
     p_start.set_defaults(func=cmd_start)
 
     # stop
@@ -291,6 +385,13 @@ def main() -> None:
     # status
     p_status = sub.add_parser("status", help="Show daemon status")
     p_status.set_defaults(func=cmd_status)
+
+    # config
+    p_config = sub.add_parser("config", help="Show or generate configuration")
+    p_config.add_argument("--generate", action="store_true", help="generate a default config file")
+    p_config.add_argument("--force", action="store_true", help="overwrite existing config file")
+    p_config.add_argument("--path", action="store_true", help="print config file path only")
+    p_config.set_defaults(func=cmd_config)
 
     # devices
     p_devices = sub.add_parser("devices", help="List audio input devices")
@@ -302,7 +403,7 @@ def main() -> None:
     p_trans.add_argument("--record", type=float, metavar="SECONDS", help="record N seconds then transcribe")
     p_trans.add_argument("--engine", choices=["server", "local"], help="transcription engine")
     p_trans.add_argument("--server-url", help="whisper server URL")
-    p_trans.add_argument("--config", type=lambda p: __import__("pathlib").Path(p), help="config file path")
+    p_trans.add_argument("--config", type=Path, help="config file path")
     p_trans.set_defaults(func=cmd_transcribe)
 
     args = parser.parse_args()

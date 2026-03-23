@@ -255,14 +255,57 @@ class TestOnDeactivate:
         daemon._recording = True
         daemon._audio = MagicMock()
 
-        # Simulate VAD has buffered speech
-        daemon._vad._is_speaking = True
-        daemon._vad._speech_frames = [np.ones(16000, dtype=np.float32)]  # 1s of audio
+        # Mock VAD flush to return audio
+        remaining_audio = np.ones(16000, dtype=np.float32)
+        daemon._vad = MagicMock()
+        daemon._vad.flush.return_value = remaining_audio
 
         daemon._on_deactivate()
 
         # Should have spawned a thread to transcribe remaining audio
         mock_thread.assert_called()
+
+    @patch("whisper_dictation.daemon.threading.Thread")
+    @patch("whisper_dictation.daemon.notify")
+    @patch("whisper_dictation.daemon._create_engine")
+    def test_deactivate_flushes_speech_via_vad_flush(self, mock_create, mock_notify, mock_thread):
+        """Test _on_deactivate uses vad.flush() and spawns transcription thread."""
+        mock_create.return_value = MagicMock()
+        daemon = DictationDaemon(Config())
+        daemon._recording = True
+        daemon._audio = MagicMock()
+
+        remaining_audio = np.ones(16000, dtype=np.float32)
+        daemon._vad = MagicMock()
+        daemon._vad.flush.return_value = remaining_audio
+
+        daemon._on_deactivate()
+
+        # Thread should be spawned with the remaining audio
+        mock_thread.assert_called_once()
+        call_kwargs = mock_thread.call_args[1]
+        assert call_kwargs["target"] == daemon._transcribe_and_type
+        assert call_kwargs["daemon"] is True
+        thread_instance = mock_thread.return_value
+        thread_instance.start.assert_called_once()
+
+    @patch("whisper_dictation.daemon.threading.Thread")
+    @patch("whisper_dictation.daemon.notify")
+    @patch("whisper_dictation.daemon._create_engine")
+    def test_deactivate_no_flush_when_vad_returns_none(self, mock_create, mock_notify, mock_thread):
+        """Test _on_deactivate does NOT spawn thread when vad.flush() returns None."""
+        mock_create.return_value = MagicMock()
+        daemon = DictationDaemon(Config())
+        daemon._recording = True
+        daemon._audio = MagicMock()
+
+        daemon._vad = MagicMock()
+        daemon._vad.flush.return_value = None
+
+        daemon._on_deactivate()
+
+        # Thread should NOT be spawned
+        mock_thread.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -341,3 +384,51 @@ class TestTranscribeAndType:
         daemon._transcribe_and_type(np.zeros(16000, dtype=np.float32))
 
         mock_type_text.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# wait
+# ---------------------------------------------------------------------------
+
+
+class TestWait:
+    @patch("whisper_dictation.daemon.notify")
+    @patch("whisper_dictation.daemon._create_engine")
+    def test_wait_returns_when_not_running(self, mock_create, mock_notify):
+        """Test wait() returns when _running event is cleared."""
+        mock_engine = MagicMock()
+        mock_engine.is_available.return_value = True
+        mock_create.return_value = mock_engine
+
+        daemon = DictationDaemon(Config())
+        # Set running, then immediately clear it so the while loop exits
+        daemon._running.set()
+
+        # Mock wait to return immediately, then have is_set return False
+        call_count = [0]
+        original_is_set = daemon._running.is_set
+
+        def mock_is_set():
+            call_count[0] += 1
+            if call_count[0] > 1:
+                return False
+            return True
+
+        with patch.object(daemon._running, "is_set", side_effect=mock_is_set):
+            with patch.object(daemon._running, "wait", return_value=True):
+                daemon.wait()
+
+    @patch("whisper_dictation.daemon.notify")
+    @patch("whisper_dictation.daemon._create_engine")
+    def test_wait_keyboard_interrupt(self, mock_create, mock_notify):
+        """Test wait() handles KeyboardInterrupt by calling stop()."""
+        mock_engine = MagicMock()
+        mock_create.return_value = mock_engine
+
+        daemon = DictationDaemon(Config())
+        daemon._running.set()
+
+        with patch.object(daemon._running, "wait", side_effect=KeyboardInterrupt):
+            with patch.object(daemon, "stop") as mock_stop:
+                daemon.wait()
+                mock_stop.assert_called_once()

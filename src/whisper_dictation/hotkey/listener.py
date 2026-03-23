@@ -48,8 +48,8 @@ class HotkeyListener:
 
         self._modifiers, self._key = _parse_hotkey(binding)
         self._active = False
-        self._held_modifiers: set[str] = set()
         self._listener = None
+        self._stop_event = threading.Event()
         self._lock = threading.Lock()
 
     def _use_evdev(self) -> bool:
@@ -78,6 +78,7 @@ class HotkeyListener:
 
     def stop(self) -> None:
         """Stop listening."""
+        self._stop_event.set()
         if self._listener is not None:
             try:
                 self._listener.stop()
@@ -199,7 +200,7 @@ class HotkeyListener:
 
         import select
 
-        while True:
+        while not self._stop_event.is_set():
             r, _, _ = select.select(devices, [], [], 1.0)
             for dev in r:
                 try:

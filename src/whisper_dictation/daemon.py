@@ -9,7 +9,6 @@ import numpy as np
 
 from .audio import AudioStream
 from .config import Config
-from .engine.base import TranscriptionEngine
 from .engine.server import ServerEngine
 from .hotkey import HotkeyListener
 from .notifier import notify
@@ -42,6 +41,7 @@ class DictationDaemon:
             threshold=config.vad.threshold,
             silence_ms=config.vad.silence_ms,
             min_speech_ms=config.vad.min_speech_ms,
+            max_speech_s=config.vad.max_speech_s,
         )
         self._audio: AudioStream | None = None
         self._hotkey: HotkeyListener | None = None
@@ -68,7 +68,7 @@ class DictationDaemon:
         text = self._engine.transcribe(audio, self.config.audio.sample_rate)
         if text:
             type_text(text + " ")
-            log.info("Typed: %s", text[:80])
+            log.debug("Typed: %d chars", len(text))
 
     def _on_activate(self) -> None:
         """Hotkey pressed — start recording."""
@@ -98,14 +98,13 @@ class DictationDaemon:
             self._audio = None
 
         # Process any remaining buffered speech
-        if self._vad.is_speaking and self._vad._speech_frames:
-            remaining = np.concatenate(self._vad._speech_frames)
-            if len(remaining) > self.config.audio.sample_rate * self.config.vad.min_speech_ms / 1000:
-                threading.Thread(
-                    target=self._transcribe_and_type,
-                    args=(remaining,),
-                    daemon=True,
-                ).start()
+        remaining = self._vad.flush()
+        if remaining is not None:
+            threading.Thread(
+                target=self._transcribe_and_type,
+                args=(remaining,),
+                daemon=True,
+            ).start()
 
         notify("Stopped", "Dictation paused")
 

@@ -27,7 +27,7 @@ class ServerConfig:
     url: str = "http://localhost:10300"
     model: str = "Systran/faster-whisper-large-v3"
     language: str = "en"
-    timeout: int = 30
+    timeout: int = 10
 
 
 @dataclass(frozen=True)
@@ -41,6 +41,7 @@ class VADConfig:
     threshold: float = 0.5
     silence_ms: int = 800
     min_speech_ms: int = 250
+    max_speech_s: float = 90.0
 
 
 @dataclass(frozen=True)
@@ -72,13 +73,18 @@ def _apply_env_overrides(config: Config) -> Config:
         "WHISPER_SERVER_URL": ("server", "url"),
         "WHISPER_MODEL": ("server", "model"),
         "WHISPER_LANG": ("server", "language"),
+        "WHISPER_TIMEOUT": ("server", "timeout"),
         "DICTATION_HOTKEY": ("hotkey", "binding"),
         "DICTATION_MODE": ("hotkey", "mode"),
         "DICTATION_ENGINE": ("engine", "type"),
+        "DICTATION_ENGINE_COMPUTE": ("engine", "compute_type"),
+        "DICTATION_ENGINE_DEVICE": ("engine", "device"),
         "DICTATION_AUDIO_DEVICE": ("audio", "device"),
+        "DICTATION_SAMPLE_RATE": ("audio", "sample_rate"),
         "DICTATION_VAD_THRESHOLD": ("vad", "threshold"),
         "DICTATION_VAD_SILENCE_MS": ("vad", "silence_ms"),
         "DICTATION_VAD_MIN_SPEECH_MS": ("vad", "min_speech_ms"),
+        "DICTATION_VAD_MAX_SPEECH_S": ("vad", "max_speech_s"),
     }
 
     sections: dict[str, dict] = {
@@ -144,4 +150,38 @@ def load_config(config_path: Path | None = None) -> Config:
     else:
         config = Config()
 
-    return _apply_env_overrides(config)
+    config = _apply_env_overrides(config)
+    _validate(config)
+    return config
+
+
+def _validate(config: Config) -> None:
+    """Validate config values and raise ValueError with clear messages."""
+    errors: list[str] = []
+
+    if config.hotkey.mode not in ("toggle", "hold"):
+        errors.append(f"hotkey.mode must be 'toggle' or 'hold', got '{config.hotkey.mode}'")
+
+    if config.engine.type not in ("server", "local"):
+        errors.append(f"engine.type must be 'server' or 'local', got '{config.engine.type}'")
+
+    if not (0.0 <= config.vad.threshold <= 1.0):
+        errors.append(f"vad.threshold must be 0.0-1.0, got {config.vad.threshold}")
+
+    if config.vad.silence_ms <= 0:
+        errors.append(f"vad.silence_ms must be positive, got {config.vad.silence_ms}")
+
+    if config.vad.min_speech_ms <= 0:
+        errors.append(f"vad.min_speech_ms must be positive, got {config.vad.min_speech_ms}")
+
+    if config.vad.max_speech_s <= 0:
+        errors.append(f"vad.max_speech_s must be positive, got {config.vad.max_speech_s}")
+
+    if config.server.timeout <= 0:
+        errors.append(f"server.timeout must be positive, got {config.server.timeout}")
+
+    if config.audio.sample_rate <= 0:
+        errors.append(f"audio.sample_rate must be positive, got {config.audio.sample_rate}")
+
+    if errors:
+        raise ValueError("Invalid configuration:\n  - " + "\n  - ".join(errors))

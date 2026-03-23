@@ -117,6 +117,30 @@ class TestEnsureModel:
 
         assert mock_whisper.WhisperModel.call_count == 1
 
+    def test_double_checked_locking_returns_early(self, engine):
+        """Cover line 33: _model set between outer check and lock acquisition."""
+        import threading
+
+        original_lock = engine._model_lock
+        sentinel = MagicMock(name="already_loaded_model")
+
+        class SetModelOnEnterLock:
+            """A lock that sets _model when acquired, simulating a race."""
+
+            def __enter__(self_lock):
+                original_lock.__enter__()
+                engine._model = sentinel
+                return self_lock
+
+            def __exit__(self_lock, *args):
+                return original_lock.__exit__(*args)
+
+        engine._model = None
+        engine._model_lock = SetModelOnEnterLock()
+        engine._ensure_model()
+        # Model should be the sentinel set inside the lock, not a new one
+        assert engine._model is sentinel
+
 
 # ---------------------------------------------------------------------------
 # transcribe
