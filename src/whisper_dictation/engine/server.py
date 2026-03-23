@@ -21,12 +21,14 @@ class ServerEngine(TranscriptionEngine):
         self.config = config
         self._base_url = config.url.rstrip("/")
         self._url = f"{self._base_url}/v1/audio/transcriptions"
+        self._health_url = f"{self._base_url}/health"
+        self._session = requests.Session()
 
     def transcribe(self, audio: np.ndarray, sample_rate: int = 16000) -> str:
         wav_data = audio_to_wav(audio, sample_rate)
 
         try:
-            resp = requests.post(
+            resp = self._session.post(
                 self._url,
                 files={"file": ("audio.wav", wav_data, "audio/wav")},
                 data={
@@ -59,10 +61,10 @@ class ServerEngine(TranscriptionEngine):
 
     def is_available(self) -> bool:
         try:
-            resp = requests.get(
-                f"{self._base_url}/health",
-                timeout=3,
-            )
+            resp = self._session.get(self._health_url, timeout=3)
             return resp.ok
         except requests.RequestException:
             return False
+
+    def close(self) -> None:
+        self._session.close()

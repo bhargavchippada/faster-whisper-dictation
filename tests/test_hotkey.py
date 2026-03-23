@@ -6,7 +6,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from whisper_dictation.hotkey.listener import HotkeyListener, _parse_hotkey
+from whisper_dictation.hotkey.listener import (
+    HotkeyListener,
+    _parse_hotkey,
+    _parse_poll_ms,
+    _throttle_pynput_xrecord,
+)
 
 # ---------------------------------------------------------------------------
 # _parse_hotkey
@@ -43,6 +48,14 @@ class TestParseHotkey:
         mods, key = _parse_hotkey("super+a")
         assert mods == {"super"}
         assert key == "a"
+
+
+class TestParsePollMs:
+    def test_invalid_value_uses_default(self):
+        assert _parse_poll_ms("abc") == 30
+
+    def test_minimum_is_enforced(self):
+        assert _parse_poll_ms("1") == 10
 
 
 # ---------------------------------------------------------------------------
@@ -591,6 +604,70 @@ class TestThrottleXlib:
             "sys.modules", {"Xlib": None, "Xlib.protocol": None, "Xlib.protocol.display": None}
         ):
             HotkeyListener._throttle_xlib()  # should not raise
+
+    def test_module_throttle_noop_on_import_error(self):
+        import builtins
+
+        import whisper_dictation.hotkey.listener as mod
+
+        real_import = builtins.__import__
+        saved_flag = mod._throttle_applied
+        mod._throttle_applied = False
+
+        def fake_import(name, *args, **kwargs):
+            if name == "Xlib.protocol.display":
+                raise ImportError("missing xlib")
+            return real_import(name, *args, **kwargs)
+
+        try:
+            with patch("builtins.__import__", side_effect=fake_import):
+                _throttle_pynput_xrecord()
+        finally:
+            mod._throttle_applied = saved_flag
+
+    def test_handles_unexpected_import_exception(self):
+        import builtins
+
+        import whisper_dictation.hotkey.listener as mod
+
+        real_import = builtins.__import__
+        saved_flag = mod._throttle_applied
+        mod._throttle_applied = False
+
+        def fake_import(name, *args, **kwargs):
+            if name == "Xlib.protocol.display":
+                raise RuntimeError("broken import")
+            return real_import(name, *args, **kwargs)
+
+        try:
+            with patch("builtins.__import__", side_effect=fake_import):
+                _throttle_pynput_xrecord()
+        finally:
+            mod._throttle_applied = saved_flag
+
+    def test_throttled_wrapper_sleeps_after_warmup(self):
+        from Xlib.protocol.display import Display
+
+        import whisper_dictation.hotkey.listener as mod
+
+        original = Display.send_and_recv
+        saved_flag = mod._throttle_applied
+        mod._throttle_applied = False
+
+        def fake_send_and_recv(self, *args, **kwargs):
+            return None
+
+        try:
+            Display.send_and_recv = fake_send_and_recv
+            _throttle_pynput_xrecord()
+            throttled = Display.send_and_recv
+            with patch("whisper_dictation.hotkey.listener.time.sleep") as mock_sleep:
+                for _ in range(25):
+                    throttled(object(), recv=True)
+            assert mock_sleep.call_count > 0
+        finally:
+            Display.send_and_recv = original
+            mod._throttle_applied = saved_flag
 
 
 class TestEvdevLoop:

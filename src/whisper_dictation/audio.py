@@ -74,7 +74,7 @@ class AudioStream:
     ) -> None:
         if status:
             log.debug("Audio status: %s", status)
-        self.callback(indata.copy().flatten())
+        self.callback(indata.reshape(-1).copy())
 
     def start(self) -> None:
         """Start capturing audio."""

@@ -28,6 +28,7 @@ Cloud dictation services (Google, Apple, Microsoft) send your audio to remote se
 - **Audit-friendly** — open source, read every line of what handles your audio
 
 Even in server mode, the default configuration binds the Docker container to `localhost` — your audio stays on your LAN at most.
+Recent live benchmarks on the current build showed the daemon averaging `0.00%` CPU while idle in server mode.
 
 ## Features
 
@@ -54,6 +55,9 @@ pipx install faster-whisper-dictation
 
 # Or with pip
 pip install faster-whisper-dictation
+
+# Build release artifacts from a checkout
+uv build --clear --no-cache
 ```
 
 ### Optional: local engine (no Docker server needed)
@@ -256,7 +260,7 @@ faster-whisper-dictation/
 │   ├── vad.py              # Silero VAD (ONNX, SHA-256 verified)
 │   ├── typer.py            # Platform-aware text input (clipboard + paste)
 │   └── notifier.py         # Cross-platform desktop notifications
-├── tests/                  # 326 tests, 100% coverage
+├── tests/                  # 332 tests, 100% coverage
 ├── .github/workflows/      # CI: lint + test on Python 3.10-3.14
 ├── docker-compose.yml      # GPU server
 ├── docker-compose.cpu.yml  # CPU server
@@ -348,6 +352,9 @@ uv run pytest -v
 
 # Run tests with coverage
 uv run pytest tests/ --cov=whisper_dictation --cov-report=term-missing
+
+# Build fresh artifacts without cache
+uv build --clear --no-cache
 
 # Lint
 uv run ruff check src/ tests/

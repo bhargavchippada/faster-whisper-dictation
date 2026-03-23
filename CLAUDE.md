@@ -33,7 +33,8 @@ src/whisper_dictation/
 - **ONNX by default**: VAD uses ONNX Runtime, not PyTorch, to keep the dependency footprint small.
 - **pynput + evdev**: pynput handles macOS/Windows/X11; evdev handles Linux Wayland where pynput fails. Callbacks fire outside the hotkey lock to prevent deadlocks.
 - **Non-blocking notifications**: `subprocess.Popen` (not `.run`) for Linux/macOS so notifications never block the daemon.
-- **No shell scripts**: Everything is Python.
+- **Persistent HTTP session in server mode**: `ServerEngine` reuses a `requests.Session` to reduce per-request overhead when talking to the local STT server.
+- **Legacy scripts remain**: `scripts/` contains older helper utilities; the maintained implementation lives under `src/whisper_dictation/`.
 
 ## Security Considerations
 
@@ -86,6 +87,9 @@ uv run faster-whisper-dictation -v start
 
 # Lint
 uv run ruff check src/ tests/
+
+# Build clean artifacts without cache
+uv build --clear --no-cache
 ```
 
 ## Testing
@@ -94,6 +98,7 @@ uv run ruff check src/ tests/
 - No tests should require a running Whisper server, microphone, or display server.
 - Use `unittest.mock.patch` for all external subprocess calls and hardware interfaces.
 - Target: 100% test coverage. All new code must include tests.
+- Current status: 332 tests, 100% line coverage.
 
 ## CI
 
@@ -101,7 +106,13 @@ GitHub Actions runs on every push/PR to main:
 - Python 3.10, 3.11, 3.12, 3.13, 3.14 matrix
 - Lint with ruff
 - Tests with coverage gate (minimum 80%)
-- 326 tests, 100% coverage
+- 332 tests, 100% coverage
+
+## Performance Notes
+
+- In server mode, idle daemon CPU should be effectively 0%. Recent live `pidstat` samples showed `0.00%` average CPU while idle.
+- Server-mode transcription is dominated by localhost HTTP round-trips and backend execution, not local Python CPU.
+- If CPU appears hot while idle on Linux, check whether the daemon fell back to `pynput`; `evdev` is preferred when input-device permissions are available.
 
 ## Config Priority (highest to lowest)
 
