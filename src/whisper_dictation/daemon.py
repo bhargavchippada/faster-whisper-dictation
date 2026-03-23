@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
@@ -42,6 +43,7 @@ class DictationDaemon:
         self._recording = False
         self._recorded_chunks: list[np.ndarray] = []
         self._lock = threading.Lock()
+        self._transcribe_pool = ThreadPoolExecutor(max_workers=1)
 
     def _on_audio_chunk(self, audio: np.ndarray) -> None:
         """Called for each audio chunk from the microphone.
@@ -67,11 +69,7 @@ class DictationDaemon:
             return
 
         if complete and utterance is not None:
-            threading.Thread(
-                target=self._transcribe_and_type,
-                args=(utterance,),
-                daemon=True,
-            ).start()
+            self._transcribe_pool.submit(self._transcribe_and_type, utterance)
 
     def _transcribe_and_type(self, audio: np.ndarray) -> None:
         """Transcribe audio and type the result."""
@@ -99,16 +97,20 @@ class DictationDaemon:
         if self.streaming:
             self._vad.reset()
 
-        self._audio = AudioStream(self.config.audio, self._on_audio_chunk)
+        audio = AudioStream(self.config.audio, self._on_audio_chunk)
         try:
-            self._audio.start()
+            audio.start()
         except Exception:
             log.error("Failed to start audio capture", exc_info=True)
-            self._audio.stop()
-            self._audio = None
+            audio.stop()
             with self._lock:
                 self._recording = False
+                self._audio = None
             notify("Error", "Could not access microphone")
+            return
+
+        with self._lock:
+            self._audio = audio
 
     def _on_deactivate(self) -> None:
         """Hotkey released/toggled — stop recording and transcribe."""
@@ -118,33 +120,26 @@ class DictationDaemon:
             self._recording = False
             chunks = list(self._recorded_chunks)
             self._recorded_chunks.clear()
+            audio = self._audio
+            self._audio = None
 
         log.info("Recording stopped")
 
-        if self._audio is not None:
-            self._audio.stop()
-            self._audio = None
+        if audio is not None:
+            audio.stop()
 
         if self.streaming:
             # Flush any remaining VAD-buffered speech
             remaining = self._vad.flush()
             if remaining is not None:
-                threading.Thread(
-                    target=self._transcribe_and_type,
-                    args=(remaining,),
-                    daemon=True,
-                ).start()
+                self._transcribe_pool.submit(self._transcribe_and_type, remaining)
         elif chunks:
             # Batch mode: transcribe the full recording at once
             full_audio = np.concatenate(chunks)
             duration = len(full_audio) / self.config.audio.sample_rate
             log.info("Transcribing %.1fs of audio...", duration)
             notify("Transcribing", f"{duration:.0f}s of audio...")
-            threading.Thread(
-                target=self._transcribe_and_type,
-                args=(full_audio,),
-                daemon=True,
-            ).start()
+            self._transcribe_pool.submit(self._transcribe_and_type, full_audio)
         else:
             notify("Stopped", "No audio recorded")
 
@@ -200,6 +195,7 @@ class DictationDaemon:
             self._hotkey.stop()
             self._hotkey = None
 
+        self._transcribe_pool.shutdown(wait=False)
         self._engine.close()
         log.info("Dictation daemon stopped")
         notify("Dictation Stopped", "Daemon exited")

@@ -8,6 +8,7 @@ from io import BytesIO
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pytest
 
 from whisper_dictation.audio import AudioStream, audio_to_wav, list_devices
 from whisper_dictation.config import AudioConfig
@@ -205,6 +206,22 @@ class TestAudioStream:
         stream = AudioStream(cfg, MagicMock())
         # Should not raise
         stream.stop()
+
+    @patch("whisper_dictation.audio.sd")
+    def test_start_failure_cleans_up_stream(self, mock_sd):
+        """If stream.start() fails, the stream is closed and set to None."""
+        cfg = AudioConfig(sample_rate=16000, channels=1, device=None)
+        stream = AudioStream(cfg, MagicMock())
+
+        mock_input_stream = MagicMock()
+        mock_input_stream.start.side_effect = RuntimeError("device busy")
+        mock_sd.InputStream.return_value = mock_input_stream
+
+        with pytest.raises(RuntimeError, match="device busy"):
+            stream.start()
+
+        mock_input_stream.close.assert_called_once()
+        assert stream._stream is None
 
     @patch("whisper_dictation.audio.sd")
     def test_active_property(self, mock_sd):

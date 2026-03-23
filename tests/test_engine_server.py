@@ -108,6 +108,17 @@ class TestTranscribe:
         assert text == ""
 
     @patch("whisper_dictation.engine.server.requests.post")
+    def test_invalid_json_returns_empty(self, mock_post, engine):
+        """Non-JSON response (e.g. HTML error page) returns empty string."""
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.return_value = None
+        mock_resp.json.side_effect = ValueError("No JSON")
+        mock_post.return_value = mock_resp
+
+        text = engine.transcribe(np.zeros(16000, dtype=np.float32))
+        assert text == ""
+
+    @patch("whisper_dictation.engine.server.requests.post")
     def test_sends_wav_file(self, mock_post, engine):
         mock_resp = MagicMock()
         mock_resp.json.return_value = {"text": "hi"}

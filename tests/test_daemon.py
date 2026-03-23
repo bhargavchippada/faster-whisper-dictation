@@ -271,10 +271,9 @@ class TestOnDeactivate:
         # Should not call notify for stop
         mock_notify.assert_not_called()
 
-    @patch("whisper_dictation.daemon.threading.Thread")
     @patch("whisper_dictation.daemon.notify")
     @patch("whisper_dictation.daemon.create_engine")
-    def test_deactivate_flushes_speech_via_vad_flush(self, mock_create, mock_notify, mock_thread):
+    def test_deactivate_flushes_speech_via_vad_flush(self, mock_create, mock_notify):
         """Test streaming mode _on_deactivate uses vad.flush()."""
         mock_create.return_value = MagicMock()
         daemon = DictationDaemon(Config(), streaming=True)
@@ -285,15 +284,12 @@ class TestOnDeactivate:
         daemon._vad = MagicMock()
         daemon._vad.flush.return_value = remaining_audio
 
+        mock_pool = MagicMock()
+        daemon._transcribe_pool = mock_pool
+
         daemon._on_deactivate()
 
-        # Thread should be spawned with the remaining audio
-        mock_thread.assert_called_once()
-        call_kwargs = mock_thread.call_args[1]
-        assert call_kwargs["target"] == daemon._transcribe_and_type
-        assert call_kwargs["daemon"] is True
-        thread_instance = mock_thread.return_value
-        thread_instance.start.assert_called_once()
+        mock_pool.submit.assert_called_once_with(daemon._transcribe_and_type, remaining_audio)
 
     @patch("whisper_dictation.daemon.threading.Thread")
     @patch("whisper_dictation.daemon.notify")
@@ -311,10 +307,9 @@ class TestOnDeactivate:
         daemon._on_deactivate()
         mock_thread.assert_not_called()
 
-    @patch("whisper_dictation.daemon.threading.Thread")
     @patch("whisper_dictation.daemon.notify")
     @patch("whisper_dictation.daemon.create_engine")
-    def test_deactivate_batch_transcribes_full_audio(self, mock_create, mock_notify, mock_thread):
+    def test_deactivate_batch_transcribes_full_audio(self, mock_create, mock_notify):
         """Batch mode: deactivate concatenates chunks and transcribes."""
         mock_create.return_value = MagicMock()
         daemon = DictationDaemon(Config())
@@ -325,14 +320,15 @@ class TestOnDeactivate:
             np.ones(512, dtype=np.float32),
         ]
 
+        mock_pool = MagicMock()
+        daemon._transcribe_pool = mock_pool
+
         daemon._on_deactivate()
 
-        mock_thread.assert_called_once()
-        call_kwargs = mock_thread.call_args[1]
-        assert call_kwargs["target"] == daemon._transcribe_and_type
-        # Full audio should be concatenated (1024 samples)
-        audio_arg = mock_thread.call_args[1]["args"][0]
-        assert len(audio_arg) == 1024
+        mock_pool.submit.assert_called_once()
+        args = mock_pool.submit.call_args[0]
+        assert args[0] == daemon._transcribe_and_type
+        assert len(args[1]) == 1024
 
     @patch("whisper_dictation.daemon.threading.Thread")
     @patch("whisper_dictation.daemon.notify")
@@ -382,21 +378,21 @@ class TestOnAudioChunk:
         assert len(daemon._recorded_chunks) == 2
         mock_thread.assert_not_called()
 
-    @patch("whisper_dictation.daemon.threading.Thread")
     @patch("whisper_dictation.daemon.create_engine")
-    def test_streaming_mode_spawns_thread_on_utterance(self, mock_create, mock_thread):
-        """Streaming mode: completed utterance spawns transcription thread."""
+    def test_streaming_mode_submits_transcription(self, mock_create):
+        """Streaming mode: completed utterance submits transcription to pool."""
         mock_create.return_value = MagicMock()
         daemon = DictationDaemon(Config(), streaming=True)
         daemon._recording = True
+
+        mock_pool = MagicMock()
+        daemon._transcribe_pool = mock_pool
 
         utterance = np.zeros(16000, dtype=np.float32)
         with patch.object(daemon._vad, "process_chunk", return_value=(True, utterance)):
             daemon._on_audio_chunk(np.zeros(512, dtype=np.float32))
 
-        mock_thread.assert_called_once()
-        call_kwargs = mock_thread.call_args[1]
-        assert call_kwargs["target"] == daemon._transcribe_and_type
+        mock_pool.submit.assert_called_once_with(daemon._transcribe_and_type, utterance)
 
     @patch("whisper_dictation.daemon.create_engine")
     def test_no_utterance_no_thread(self, mock_create):

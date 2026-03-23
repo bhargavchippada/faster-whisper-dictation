@@ -44,15 +44,15 @@ def _throttle_pynput_xrecord() -> None:
 
         original = Display.send_and_recv
 
-        def throttled_send_and_recv(self, flush=False, event=False, request=None, recv=False):
-            import select as _select
+        _call_count = [0]
 
-            if recv or flush:
-                sock = getattr(self, "socket", None)
-                if sock is not None:
-                    ready, _, _ = _select.select([sock], [], [], _PYNPUT_SELECT_THROTTLE_S)
-                    if not ready:
-                        return
+        def throttled_send_and_recv(self, flush=False, event=False, request=None, recv=False):
+            import time
+
+            _call_count[0] += 1
+            if _call_count[0] <= 3:
+                log.debug("throttled_send_and_recv called #%d (request=%s recv=%s flush=%s)", _call_count[0], request, recv, flush)
+            time.sleep(_PYNPUT_SELECT_THROTTLE_S)
             return original(self, flush=flush, event=event, request=request, recv=recv)
 
         Display.send_and_recv = throttled_send_and_recv

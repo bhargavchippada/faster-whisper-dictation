@@ -173,7 +173,10 @@ def _win_clipboard_set(text: str) -> None:
         return
     try:
         user32.EmptyClipboard()
-        user32.SetClipboardData(_CF_UNICODETEXT, handle)
+        result = user32.SetClipboardData(_CF_UNICODETEXT, handle)
+        if not result:
+            kernel32.GlobalFree(handle)
+            log.debug("SetClipboardData failed")
     finally:
         user32.CloseClipboard()
 

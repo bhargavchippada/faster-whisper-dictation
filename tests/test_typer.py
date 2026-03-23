@@ -339,6 +339,23 @@ class TestWinClipboardSet:
 
         mock_kernel32.GlobalFree.assert_called_once_with(99)
 
+    def test_set_clipboard_data_failure_frees_handle(self):
+        """SetClipboardData failure frees the handle via GlobalFree."""
+        mock_ctypes = MagicMock()
+        mock_user32 = MagicMock()
+        mock_kernel32 = MagicMock()
+        mock_ctypes.windll.user32 = mock_user32
+        mock_ctypes.windll.kernel32 = mock_kernel32
+        mock_kernel32.GlobalAlloc.return_value = 99
+        mock_kernel32.GlobalLock.return_value = 100
+        mock_user32.SetClipboardData.return_value = 0  # failure
+
+        with patch.dict("sys.modules", {"ctypes": mock_ctypes, "ctypes.wintypes": MagicMock()}):
+            typer._win_clipboard_set("hello")
+
+        mock_kernel32.GlobalFree.assert_called_once_with(99)
+        mock_user32.CloseClipboard.assert_called_once()
+
 
 class TestSendCtrlV:
     def test_send_ctrl_v_calls_keybd_event(self):

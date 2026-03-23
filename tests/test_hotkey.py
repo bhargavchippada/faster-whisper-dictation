@@ -552,8 +552,8 @@ class TestThrottlePynputXrecord:
             # Should not raise
             _throttle_pynput_xrecord()
 
-    def test_throttled_recv_sleeps_when_no_data(self):
-        """Test the throttled send_and_recv uses select with timeout."""
+    def test_throttled_recv_sleeps_before_calling_original(self):
+        """Test the throttled send_and_recv sleeps before calling original."""
         from Xlib.protocol.display import Display
 
         from whisper_dictation.hotkey.listener import _throttle_pynput_xrecord
@@ -564,19 +564,17 @@ class TestThrottlePynputXrecord:
             throttled = Display.send_and_recv
 
             mock_self = MagicMock()
-            mock_self.socket = MagicMock()
 
-            with patch("select.select", return_value=([], [], [])) as mock_select:
+            with patch("time.sleep") as mock_sleep:
                 throttled(mock_self, recv=True)
 
-            mock_select.assert_called_once()
-            timeout = mock_select.call_args[0][3]
-            assert timeout >= 0.01
+            mock_sleep.assert_called_once()
+            assert mock_sleep.call_args[0][0] >= 0.01
         finally:
             Display.send_and_recv = original
 
-    def test_throttled_recv_calls_original_when_data_ready(self):
-        """Test the throttled send_and_recv calls original when data is ready."""
+    def test_throttled_recv_calls_original(self):
+        """Test the throttled send_and_recv calls the original function."""
         from Xlib.protocol.display import Display
 
         from whisper_dictation.hotkey.listener import _throttle_pynput_xrecord
@@ -587,16 +585,10 @@ class TestThrottlePynputXrecord:
             throttled = Display.send_and_recv
 
             mock_self = MagicMock()
-            mock_socket = MagicMock()
-            mock_self.socket = mock_socket
 
-            with (
-                patch("select.select", return_value=([mock_socket], [], [])),
-                patch.object(Display, "_original_send_and_recv", create=True),
-            ):
-                # The original is captured in the closure, so we test it doesn't skip
+            with patch("time.sleep"):
+                # original is captured in closure, wrapping should call through
                 throttled(mock_self, recv=True)
-                # If data is ready, the original should be called
         finally:
             Display.send_and_recv = original
 
@@ -612,12 +604,11 @@ class TestThrottlePynputXrecord:
             throttled = Display.send_and_recv
 
             mock_self = MagicMock()
-            # event=True should NOT trigger select throttle
-            with patch("select.select") as mock_select:
+            # event=True still goes through the throttled path (sleep + original)
+            with patch("time.sleep") as mock_sleep:
                 throttled(mock_self, event=True)
 
-            # select should not be called for event path
-            mock_select.assert_not_called()
+            mock_sleep.assert_called_once()
         finally:
             Display.send_and_recv = original
 

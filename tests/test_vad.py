@@ -645,6 +645,31 @@ class TestLoadOnnxModel:
         finally:
             vad_mod._model = original_model
 
+    def test_load_onnx_model_deletes_cache_on_load_failure(self, tmp_path):
+        """Corrupted cache file is deleted when OnnxVAD fails to load it."""
+        import whisper_dictation.vad as vad_mod
+
+        original_model = vad_mod._model
+        vad_mod._model = None
+
+        try:
+            cache_dir = tmp_path / "faster-whisper-dictation"
+            cache_dir.mkdir()
+            cache_file = cache_dir / "silero_vad.onnx"
+            cache_file.write_text("corrupted")
+
+            with (
+                patch("whisper_dictation.vad.OnnxVAD", side_effect=RuntimeError("bad model")),
+                patch("platformdirs.user_cache_dir", return_value=str(cache_dir)),
+            ):
+                with pytest.raises(RuntimeError, match="bad model"):
+                    vad_mod._load_onnx_model()
+
+            # Cache file should be deleted
+            assert not cache_file.exists()
+        finally:
+            vad_mod._model = original_model
+
 
 # ---------------------------------------------------------------------------
 # _verify_model_hash

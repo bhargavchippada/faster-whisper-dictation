@@ -53,6 +53,9 @@ class ServerEngine(TranscriptionEngine):
         except requests.RequestException as e:
             log.error("Transcription failed: %s", e)
             return ""
+        except (ValueError, KeyError) as e:
+            log.error("Invalid response from server: %s", e)
+            return ""
 
     def is_available(self) -> bool:
         try:

@@ -105,7 +105,12 @@ class AudioStream:
             device=device,
             callback=self._audio_callback,
         )
-        self._stream.start()
+        try:
+            self._stream.start()
+        except Exception:
+            self._stream.close()
+            self._stream = None
+            raise
 
     def stop(self) -> None:
         """Stop capturing audio."""

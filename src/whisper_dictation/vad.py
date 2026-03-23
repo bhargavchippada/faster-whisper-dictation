@@ -110,7 +110,12 @@ def _load_onnx_model() -> None:
             raise
         log.info("Downloaded to %s", cache)
 
-    _model = OnnxVAD(str(cache))
+    try:
+        _model = OnnxVAD(str(cache))
+    except Exception:
+        cache.unlink(missing_ok=True)
+        log.error("Failed to load ONNX model, deleted cache: %s", cache)
+        raise
     log.info("Silero VAD ONNX model loaded")
 
 
