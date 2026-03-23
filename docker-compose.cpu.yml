@@ -10,9 +10,12 @@ services:
       - WHISPER__COMPUTE_TYPE=int8
       - UVICORN_HOST=0.0.0.0  # bind all interfaces inside container; host-side restricted by ports mapping
       - UVICORN_PORT=10300
+      - LOOPBACK_HOST_URL=http://localhost:10300  # required for Realtime API (WS transcription)
       - PRELOAD_MODELS=["Systran/faster-whisper-large-v3"]
     volumes:
       - faster-whisper-models:/home/ubuntu/.cache/huggingface
 
 volumes:
   faster-whisper-models:
+    name: faster-whisper-dictation_faster-whisper-models
+    external: true
