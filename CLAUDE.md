@@ -98,7 +98,7 @@ uv build --clear --no-cache
 - No tests should require a running Whisper server, microphone, or display server.
 - Use `unittest.mock.patch` for all external subprocess calls and hardware interfaces.
 - Target: 100% test coverage. All new code must include tests.
-- Current status: 332 tests, 100% line coverage.
+- Current status: 342 tests, 100% line coverage.
 
 ## CI
 
@@ -106,7 +106,7 @@ GitHub Actions runs on every push/PR to main:
 - Python 3.10, 3.11, 3.12, 3.13, 3.14 matrix
 - Lint with ruff
 - Tests with coverage gate (minimum 80%)
-- 332 tests, 100% coverage
+- 342 tests, 100% coverage
 
 ## Performance Notes
 

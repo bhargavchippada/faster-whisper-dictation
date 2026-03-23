@@ -21,6 +21,7 @@ CONFIG_DIR = Path(user_config_dir(APP_NAME))
 CONFIG_FILE = CONFIG_DIR / "config.toml"
 PID_FILE = CONFIG_DIR / "daemon.pid"
 STATE_FILE = CONFIG_DIR / "state.json"
+LOG_FILE = CONFIG_DIR / "daemon.log"
 
 
 @dataclass(frozen=True)

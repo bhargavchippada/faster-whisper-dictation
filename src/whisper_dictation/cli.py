@@ -14,6 +14,7 @@ from pathlib import Path
 from .config import (
     CONFIG_DIR,
     CONFIG_FILE,
+    LOG_FILE,
     PID_FILE,
     STATE_FILE,
     Config,
@@ -118,8 +119,60 @@ def _cleanup_pid() -> None:
     STATE_FILE.unlink(missing_ok=True)
 
 
+def _daemonize() -> None:
+    """Double-fork to detach from the controlling terminal (Unix only).
+
+    After this call the process is a session leader with no controlling
+    terminal.  stdin is /dev/null; stdout and stderr point to LOG_FILE
+    so all output (including logging) is captured.
+
+    The original parent and intermediate child never return — they call
+    ``os._exit(0)`` after forking.
+    """
+    if not hasattr(os, "fork"):
+        raise NotImplementedError("_daemonize() requires Unix (os.fork not available)")
+
+    # First fork — parent prints info and exits
+    pid = os.fork()
+    if pid > 0:
+        print(f"Daemon starting in background (log: {LOG_FILE})")
+        os._exit(0)
+
+    os.setsid()
+
+    # Second fork — prevent reacquiring a controlling terminal
+    if os.fork() > 0:
+        os._exit(0)
+
+    # Prevent holding open a mounted filesystem
+    os.chdir("/")
+
+    # Close inherited fds (3 … max) so parent resources don't leak
+    try:
+        max_fd = os.sysconf("SC_OPEN_MAX")
+    except (AttributeError, ValueError):
+        max_fd = 1024
+    os.closerange(3, max_fd)
+
+    # Redirect stdio
+    _cloexec = getattr(os, "O_CLOEXEC", 0)
+    devnull = os.open(os.devnull, os.O_RDWR | _cloexec)
+    os.dup2(devnull, 0)  # stdin
+    os.close(devnull)
+
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    log_fd = os.open(
+        str(LOG_FILE),
+        os.O_WRONLY | os.O_CREAT | os.O_APPEND | _cloexec,
+        0o600,
+    )
+    os.dup2(log_fd, 1)  # stdout
+    os.dup2(log_fd, 2)  # stderr
+    os.close(log_fd)
+
+
 def cmd_start(args: argparse.Namespace) -> None:
-    """Start the dictation daemon in the foreground."""
+    """Start the dictation daemon."""
     from .daemon import DictationDaemon
 
     existing = _read_pid()
@@ -136,6 +189,17 @@ def cmd_start(args: argparse.Namespace) -> None:
         server_url=args.server_url,
     )
     validate(config)
+
+    background = getattr(args, "background", False)
+
+    if background:
+        if sys.platform == "win32":
+            print("--background is not supported on Windows.", file=sys.stderr)
+            sys.exit(1)
+        # Daemonize before writing PID so the PID file contains the child's PID
+        _daemonize()
+        # Re-init logging to write to the log file fd (stderr was redirected)
+        _setup_logging(args.verbose)
 
     daemon = None
     try:
@@ -230,6 +294,9 @@ def cmd_status(args: argparse.Namespace) -> None:
             print(f"  Server:  {state.get('server_url', '?')}")
         except (json.JSONDecodeError, KeyError, TypeError):
             log.debug("Could not parse state file", exc_info=True)
+
+    if LOG_FILE.exists():
+        print(f"  Log:     {LOG_FILE}")
 
 
 _DEFAULT_CONFIG_TEMPLATE = """\
@@ -424,6 +491,12 @@ def main() -> None:
         "--streaming",
         action="store_true",
         help="stream text as you speak (lower quality, real-time)",
+    )
+    p_start.add_argument(
+        "-b",
+        "--background",
+        action="store_true",
+        help="run as a background daemon (Unix only, logs to ~/.config/*/daemon.log)",
     )
     p_start.add_argument("--config", type=Path, help="config file path")
     p_start.set_defaults(func=cmd_start)

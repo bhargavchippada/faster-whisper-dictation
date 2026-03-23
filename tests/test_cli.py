@@ -11,6 +11,7 @@ import pytest
 
 from whisper_dictation.cli import (
     _cleanup_pid,
+    _daemonize,
     _read_pid,
     _setup_logging,
     _write_pid,
@@ -437,6 +438,7 @@ class TestCmdStart:
             args.hotkey = None
             args.engine = None
             args.server_url = None
+            args.background = False
 
             with pytest.raises(SystemExit):
                 cmd_start(args)
@@ -453,6 +455,7 @@ class TestCmdStart:
         args.hotkey = None
         args.engine = None
         args.server_url = None
+        args.background = False
 
         with (
             patch("whisper_dictation.cli._read_pid", return_value=None),
@@ -478,6 +481,7 @@ class TestCmdStart:
         args.hotkey = None
         args.engine = None
         args.server_url = None
+        args.background = False
 
         with (
             patch("whisper_dictation.cli._read_pid", return_value=None),
@@ -506,6 +510,7 @@ class TestCmdStart:
         args.hotkey = "ctrl+d"
         args.engine = None
         args.server_url = None
+        args.background = False
 
         with (
             patch("whisper_dictation.cli._read_pid", return_value=None),
@@ -533,6 +538,7 @@ class TestCmdStart:
         args.hotkey = None
         args.engine = "local"
         args.server_url = None
+        args.background = False
 
         with (
             patch("whisper_dictation.cli._read_pid", return_value=None),
@@ -560,6 +566,7 @@ class TestCmdStart:
         args.hotkey = None
         args.engine = None
         args.server_url = "http://custom:9000"
+        args.background = False
 
         with (
             patch("whisper_dictation.cli._read_pid", return_value=None),
@@ -588,6 +595,7 @@ class TestCmdStart:
         args.hotkey = None
         args.engine = None
         args.server_url = None
+        args.background = False
 
         with (
             patch("whisper_dictation.cli._read_pid", return_value=None),
@@ -621,6 +629,7 @@ class TestCmdStart:
         args.hotkey = None
         args.engine = None
         args.server_url = None
+        args.background = False
 
         with (
             patch("whisper_dictation.cli._read_pid", return_value=None),
@@ -653,6 +662,7 @@ class TestCmdStart:
         args.engine = None
         args.server_url = None
         args.streaming = False
+        args.background = False
 
         with (
             patch("whisper_dictation.cli._read_pid", return_value=None),
@@ -667,6 +677,254 @@ class TestCmdStart:
             cmd_start(args)
 
         mock_cleanup.assert_called_once()
+
+    def test_start_background_on_windows_exits(self, tmp_path, capsys):
+        """--background on Windows should print error and exit."""
+        from whisper_dictation.config import Config
+
+        args = MagicMock()
+        args.config = None
+        args.mode = None
+        args.hotkey = None
+        args.engine = None
+        args.server_url = None
+        args.streaming = False
+        args.background = True
+        args.verbose = False
+
+        import whisper_dictation.cli as cli_mod
+
+        with (
+            patch("whisper_dictation.cli._read_pid", return_value=None),
+            patch("whisper_dictation.cli.load_config", return_value=Config()),
+            patch.object(cli_mod.sys, "platform", "win32"),
+            pytest.raises(SystemExit),
+        ):
+            cmd_start(args)
+
+        captured = capsys.readouterr()
+        assert "--background is not supported on Windows" in captured.err
+
+    def test_start_background_calls_daemonize(self, tmp_path):
+        """--background on Unix should call _daemonize and re-init logging."""
+        from whisper_dictation.config import Config
+
+        mock_daemon = MagicMock()
+
+        args = MagicMock()
+        args.config = None
+        args.mode = None
+        args.hotkey = None
+        args.engine = None
+        args.server_url = None
+        args.streaming = False
+        args.background = True
+        args.verbose = False
+
+        with (
+            patch("whisper_dictation.cli._read_pid", return_value=None),
+            patch("whisper_dictation.cli.load_config", return_value=Config()),
+            patch("whisper_dictation.daemon.DictationDaemon", return_value=mock_daemon),
+            patch("whisper_dictation.cli._write_pid"),
+            patch("whisper_dictation.cli._cleanup_pid"),
+            patch("whisper_dictation.cli.CONFIG_DIR", tmp_path),
+            patch("whisper_dictation.cli.STATE_FILE", tmp_path / "state.json"),
+            patch("signal.signal"),
+            patch("sys.platform", "linux"),
+            patch("whisper_dictation.cli._daemonize") as mock_daemonize,
+            patch("whisper_dictation.cli._setup_logging") as mock_logging,
+        ):
+            cmd_start(args)
+
+        mock_daemonize.assert_called_once()
+        mock_logging.assert_called_once_with(False)
+        mock_daemon.start.assert_called_once()
+
+    def test_start_foreground_does_not_daemonize(self, tmp_path):
+        """Without --background, _daemonize should not be called."""
+        from whisper_dictation.config import Config
+
+        mock_daemon = MagicMock()
+
+        args = MagicMock()
+        args.config = None
+        args.mode = None
+        args.hotkey = None
+        args.engine = None
+        args.server_url = None
+        args.streaming = False
+        args.background = False
+        args.verbose = False
+
+        with (
+            patch("whisper_dictation.cli._read_pid", return_value=None),
+            patch("whisper_dictation.cli.load_config", return_value=Config()),
+            patch("whisper_dictation.daemon.DictationDaemon", return_value=mock_daemon),
+            patch("whisper_dictation.cli._write_pid"),
+            patch("whisper_dictation.cli._cleanup_pid"),
+            patch("whisper_dictation.cli.CONFIG_DIR", tmp_path),
+            patch("whisper_dictation.cli.STATE_FILE", tmp_path / "state.json"),
+            patch("signal.signal"),
+            patch("whisper_dictation.cli._daemonize") as mock_daemonize,
+        ):
+            cmd_start(args)
+
+        mock_daemonize.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# _daemonize
+# ---------------------------------------------------------------------------
+
+
+class TestDaemonize:
+    def test_first_fork_parent_exits(self):
+        """Parent process (fork returns child pid) should call os._exit(0)."""
+        with (
+            patch("os.fork", return_value=42),
+            patch("os._exit", side_effect=SystemExit(0)) as mock_exit,
+            patch("whisper_dictation.cli.LOG_FILE", "/tmp/test.log"),
+            pytest.raises(SystemExit),
+        ):
+            _daemonize()
+        mock_exit.assert_called_once_with(0)
+
+    def test_second_fork_parent_exits(self):
+        """After setsid, second fork parent should exit."""
+        fork_calls = [0]
+
+        def mock_fork():
+            fork_calls[0] += 1
+            if fork_calls[0] == 1:
+                return 0  # first fork: child continues
+            return 42  # second fork: parent exits
+
+        with (
+            patch("os.fork", side_effect=mock_fork),
+            patch("os.setsid"),
+            patch("os._exit", side_effect=SystemExit(0)) as mock_exit,
+            pytest.raises(SystemExit),
+        ):
+            _daemonize()
+        mock_exit.assert_called_once_with(0)
+
+    def test_child_redirects_stdio(self, tmp_path):
+        """Final child should redirect stdin/stdout/stderr."""
+        log_file = tmp_path / "daemon.log"
+        fd_sequence = [10, 20]  # devnull=10, log=20
+
+        def mock_fork():
+            return 0  # always child
+
+        with (
+            patch("os.fork", side_effect=mock_fork),
+            patch("os.setsid"),
+            patch("os.chdir"),
+            patch("os.closerange"),
+            patch("os.open", side_effect=fd_sequence),
+            patch("os.dup2") as mock_dup2,
+            patch("os.close"),
+            patch("whisper_dictation.cli.CONFIG_DIR", tmp_path),
+            patch("whisper_dictation.cli.LOG_FILE", log_file),
+        ):
+            _daemonize()
+
+        # stdin redirected to /dev/null (fd 10)
+        mock_dup2.assert_any_call(10, 0)
+        # stdout and stderr redirected to log file (fd 20)
+        mock_dup2.assert_any_call(20, 1)
+        mock_dup2.assert_any_call(20, 2)
+
+    def test_child_calls_chdir_and_closerange(self, tmp_path):
+        """Final child should chdir('/') and close inherited fds."""
+        log_file = tmp_path / "daemon.log"
+
+        with (
+            patch("os.fork", return_value=0),
+            patch("os.setsid"),
+            patch("os.chdir") as mock_chdir,
+            patch("os.closerange") as mock_closerange,
+            patch("os.sysconf", return_value=256),
+            patch("os.open", return_value=99),
+            patch("os.dup2"),
+            patch("os.close"),
+            patch("whisper_dictation.cli.CONFIG_DIR", tmp_path),
+            patch("whisper_dictation.cli.LOG_FILE", log_file),
+        ):
+            _daemonize()
+
+        mock_chdir.assert_called_once_with("/")
+        mock_closerange.assert_called_once_with(3, 256)
+
+    def test_closerange_fallback_when_sysconf_unavailable(self, tmp_path):
+        """Falls back to 1024 when os.sysconf is unavailable."""
+        log_file = tmp_path / "daemon.log"
+
+        with (
+            patch("os.fork", return_value=0),
+            patch("os.setsid"),
+            patch("os.chdir"),
+            patch("os.closerange") as mock_closerange,
+            patch("os.sysconf", side_effect=AttributeError),
+            patch("os.open", return_value=99),
+            patch("os.dup2"),
+            patch("os.close"),
+            patch("whisper_dictation.cli.CONFIG_DIR", tmp_path),
+            patch("whisper_dictation.cli.LOG_FILE", log_file),
+        ):
+            _daemonize()
+
+        mock_closerange.assert_called_once_with(3, 1024)
+
+    def test_no_fork_raises_not_implemented(self):
+        """On platforms without os.fork, raise NotImplementedError."""
+        # Temporarily remove os.fork to simulate Windows
+        original_fork = os.fork
+        try:
+            del os.fork
+            with pytest.raises(NotImplementedError, match="os.fork"):
+                _daemonize()
+        finally:
+            os.fork = original_fork
+
+
+# ---------------------------------------------------------------------------
+# cmd_status — log file display
+# ---------------------------------------------------------------------------
+
+
+class TestCmdStatusLogFile:
+    def test_status_shows_log_file_when_exists(self, tmp_path, capsys):
+        log_file = tmp_path / "daemon.log"
+        log_file.write_text("some log output")
+        state_file = tmp_path / "state.json"
+
+        with (
+            patch("whisper_dictation.cli._read_pid", return_value=12345),
+            patch("whisper_dictation.cli.STATE_FILE", state_file),
+            patch("whisper_dictation.cli.LOG_FILE", log_file),
+            patch("whisper_dictation.cli.PID_FILE", tmp_path / "daemon.pid"),
+        ):
+            cmd_status(MagicMock())
+
+        captured = capsys.readouterr()
+        assert "Log:" in captured.out
+        assert "daemon.log" in captured.out
+
+    def test_status_no_log_file(self, tmp_path, capsys):
+        log_file = tmp_path / "daemon.log"  # does not exist
+        state_file = tmp_path / "state.json"
+
+        with (
+            patch("whisper_dictation.cli._read_pid", return_value=12345),
+            patch("whisper_dictation.cli.STATE_FILE", state_file),
+            patch("whisper_dictation.cli.LOG_FILE", log_file),
+            patch("whisper_dictation.cli.PID_FILE", tmp_path / "daemon.pid"),
+        ):
+            cmd_status(MagicMock())
+
+        captured = capsys.readouterr()
+        assert "Log:" not in captured.out
 
 
 # ---------------------------------------------------------------------------
@@ -889,6 +1147,27 @@ class TestMain:
             assert args.hotkey == "ctrl+d"
             assert args.engine == "local"
             assert args.server_url == "http://x:9000"
+            assert args.background is False
+
+    def test_start_background_flag(self):
+        with (
+            patch("sys.argv", ["prog", "start", "-b"]),
+            patch("whisper_dictation.cli.cmd_start") as mock_start,
+            patch("whisper_dictation.cli._setup_logging"),
+        ):
+            main()
+            args = mock_start.call_args[0][0]
+            assert args.background is True
+
+    def test_start_background_long_flag(self):
+        with (
+            patch("sys.argv", ["prog", "start", "--background"]),
+            patch("whisper_dictation.cli.cmd_start") as mock_start,
+            patch("whisper_dictation.cli._setup_logging"),
+        ):
+            main()
+            args = mock_start.call_args[0][0]
+            assert args.background is True
 
     def test_stop_subcommand(self):
         with (

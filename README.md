@@ -157,6 +157,10 @@ faster-whisper-dictation start --engine local
 # Enable real-time streaming (text appears as you speak)
 faster-whisper-dictation start --streaming
 
+# Run as a background daemon (Unix only, no need for &)
+faster-whisper-dictation start -b
+faster-whisper-dictation start --background --mode hold
+
 # Check status
 faster-whisper-dictation status
 
@@ -260,7 +264,7 @@ faster-whisper-dictation/
 │   ├── vad.py              # Silero VAD (ONNX, SHA-256 verified)
 │   ├── typer.py            # Platform-aware text input (clipboard + paste)
 │   └── notifier.py         # Cross-platform desktop notifications
-├── tests/                  # 332 tests, 100% coverage
+├── tests/                  # 342 tests, 100% coverage
 ├── .github/workflows/      # CI: lint + test on Python 3.10-3.14
 ├── docker-compose.yml      # GPU server
 ├── docker-compose.cpu.yml  # CPU server
