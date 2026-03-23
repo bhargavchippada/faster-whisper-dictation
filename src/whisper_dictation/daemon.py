@@ -199,7 +199,7 @@ class DictationDaemon:
 
         self._engine.close()
         log.info("Dictation daemon stopped")
-        notify("Dictation Stopped", "")
+        notify("Dictation Stopped", "Daemon exited")
 
     def wait(self) -> None:
         """Block until the daemon is stopped."""
