@@ -439,15 +439,15 @@ class TestLoadModelTorch:
 
 
 class TestLoadOnnxModel:
-    def test_load_onnx_model_custom_url_skips_hash(self, tmp_path):
-        """Test custom VAD model URL skips SHA-256 verification."""
+    def test_load_onnx_model_skips_hash_by_default(self, tmp_path):
+        """Test hash verification is skipped by default."""
         import whisper_dictation.vad as vad_mod
 
         original_model = vad_mod._model
         vad_mod._model = None
 
         mock_response = MagicMock()
-        mock_response.read.return_value = b"custom model"
+        mock_response.read.return_value = b"model data"
         mock_response.__enter__ = MagicMock(return_value=mock_response)
         mock_response.__exit__ = MagicMock(return_value=False)
 
@@ -457,15 +457,40 @@ class TestLoadOnnxModel:
                 patch("platformdirs.user_cache_dir", return_value=str(tmp_path)),
                 patch("urllib.request.urlopen", return_value=mock_response),
                 patch("whisper_dictation.vad._verify_model_hash") as mock_verify,
-                patch.dict(
-                    "os.environ", {"DICTATION_VAD_MODEL_URL": "https://example.com/model.onnx"}
-                ),
                 patch.dict("sys.modules", {"onnxruntime": MagicMock()}),
             ):
                 vad_mod._load_onnx_model()
                 mock_verify.assert_not_called()
         finally:
             vad_mod._model = original_model
+
+    def test_load_onnx_model_verifies_hash_when_enabled(self, tmp_path):
+        """Test hash verification runs when DICTATION_VAD_VERIFY_HASH=true."""
+        import whisper_dictation.vad as vad_mod
+
+        original_model = vad_mod._model
+        original_verify = vad_mod._VERIFY_HASH
+        vad_mod._model = None
+        vad_mod._VERIFY_HASH = True
+
+        mock_response = MagicMock()
+        mock_response.read.return_value = b"model data"
+        mock_response.__enter__ = MagicMock(return_value=mock_response)
+        mock_response.__exit__ = MagicMock(return_value=False)
+
+        try:
+            with (
+                patch("whisper_dictation.vad.OnnxVAD"),
+                patch("platformdirs.user_cache_dir", return_value=str(tmp_path)),
+                patch("urllib.request.urlopen", return_value=mock_response),
+                patch("whisper_dictation.vad._verify_model_hash") as mock_verify,
+                patch.dict("sys.modules", {"onnxruntime": MagicMock()}),
+            ):
+                vad_mod._load_onnx_model()
+                mock_verify.assert_called_once()
+        finally:
+            vad_mod._model = original_model
+            vad_mod._VERIFY_HASH = original_verify
 
     def test_load_onnx_model_downloads_when_missing(self, tmp_path):
         """Test _load_onnx_model downloads model when cache doesn't exist."""
@@ -486,7 +511,6 @@ class TestLoadOnnxModel:
                 patch("whisper_dictation.vad.OnnxVAD") as mock_onnx_vad,
                 patch("platformdirs.user_cache_dir", return_value=str(tmp_path)),
                 patch("urllib.request.urlopen", return_value=mock_response) as mock_download,
-                patch("whisper_dictation.vad._verify_model_hash"),
                 patch.dict("sys.modules", {"onnxruntime": mock_ort}),
             ):
                 vad_mod._load_onnx_model()
@@ -500,7 +524,9 @@ class TestLoadOnnxModel:
         import whisper_dictation.vad as vad_mod
 
         original_model = vad_mod._model
+        original_verify = vad_mod._VERIFY_HASH
         vad_mod._model = None
+        vad_mod._VERIFY_HASH = True
 
         mock_response = MagicMock()
         mock_response.read.return_value = b"bad model data"
@@ -525,6 +551,7 @@ class TestLoadOnnxModel:
             assert not (tmp_path / "silero_vad.onnx").exists()
         finally:
             vad_mod._model = original_model
+            vad_mod._VERIFY_HASH = original_verify
 
     def test_load_onnx_model_cleans_up_on_download_failure(self, tmp_path):
         """Test _load_onnx_model removes .tmp file when download itself fails."""
@@ -675,33 +702,28 @@ class TestOnnxVAD:
                 vad.__init__("fake_model.onnx")
 
             assert vad.session is mock_session
-            assert vad._h.shape == (2, 1, 64)
-            assert vad._c.shape == (2, 1, 64)
+            assert vad._state.shape == (2, 1, 128)
 
     def test_reset_states(self):
-        """Test OnnxVAD.reset_states zeros out hidden states."""
+        """Test OnnxVAD.reset_states zeros out hidden state."""
         from whisper_dictation.vad import OnnxVAD
 
         vad = OnnxVAD.__new__(OnnxVAD)
-        vad._h = np.ones((2, 1, 64), dtype=np.float32)
-        vad._c = np.ones((2, 1, 64), dtype=np.float32)
+        vad._state = np.ones((2, 1, 128), dtype=np.float32)
         vad.reset_states()
-        np.testing.assert_array_equal(vad._h, np.zeros((2, 1, 64), dtype=np.float32))
-        np.testing.assert_array_equal(vad._c, np.zeros((2, 1, 64), dtype=np.float32))
+        np.testing.assert_array_equal(vad._state, np.zeros((2, 1, 128), dtype=np.float32))
 
     def test_call_float32_input(self):
         """Test OnnxVAD __call__ with float32 input."""
         from whisper_dictation.vad import OnnxVAD
 
         vad = OnnxVAD.__new__(OnnxVAD)
-        vad._h = np.zeros((2, 1, 64), dtype=np.float32)
-        vad._c = np.zeros((2, 1, 64), dtype=np.float32)
+        vad._state = np.zeros((2, 1, 128), dtype=np.float32)
         vad._sr = np.array(16000, dtype=np.int64)
 
         mock_session = MagicMock()
-        new_h = np.zeros((2, 1, 64), dtype=np.float32)
-        new_c = np.zeros((2, 1, 64), dtype=np.float32)
-        mock_session.run.return_value = [np.array([[0.85]]), new_h, new_c]
+        new_state = np.zeros((2, 1, 128), dtype=np.float32)
+        mock_session.run.return_value = [np.array([[0.85]]), new_state]
         vad.session = mock_session
 
         audio = np.zeros(512, dtype=np.float32)
@@ -718,14 +740,12 @@ class TestOnnxVAD:
         from whisper_dictation.vad import OnnxVAD
 
         vad = OnnxVAD.__new__(OnnxVAD)
-        vad._h = np.zeros((2, 1, 64), dtype=np.float32)
-        vad._c = np.zeros((2, 1, 64), dtype=np.float32)
+        vad._state = np.zeros((2, 1, 128), dtype=np.float32)
         vad._sr = np.array(16000, dtype=np.int64)
 
         mock_session = MagicMock()
-        new_h = np.zeros((2, 1, 64), dtype=np.float32)
-        new_c = np.zeros((2, 1, 64), dtype=np.float32)
-        mock_session.run.return_value = [np.array([[0.5]]), new_h, new_c]
+        new_state = np.zeros((2, 1, 128), dtype=np.float32)
+        mock_session.run.return_value = [np.array([[0.5]]), new_state]
         vad.session = mock_session
 
         audio = np.zeros(512, dtype=np.int16)
@@ -735,50 +755,19 @@ class TestOnnxVAD:
         call_inputs = mock_session.run.call_args[0][1]
         assert call_inputs["input"].dtype == np.float32
 
-    def test_call_updates_hidden_states(self):
-        """Test OnnxVAD __call__ updates _h and _c from session output."""
+    def test_call_updates_state(self):
+        """Test OnnxVAD __call__ updates _state from session output."""
         from whisper_dictation.vad import OnnxVAD
 
         vad = OnnxVAD.__new__(OnnxVAD)
-        vad._h = np.zeros((2, 1, 64), dtype=np.float32)
-        vad._c = np.zeros((2, 1, 64), dtype=np.float32)
+        vad._state = np.zeros((2, 1, 128), dtype=np.float32)
         vad._sr = np.array(16000, dtype=np.int64)
 
         mock_session = MagicMock()
-        new_h = np.ones((2, 1, 64), dtype=np.float32)
-        new_c = np.ones((2, 1, 64), dtype=np.float32) * 2
-        mock_session.run.return_value = [np.array([[0.7]]), new_h, new_c]
+        new_state = np.ones((2, 1, 128), dtype=np.float32)
+        mock_session.run.return_value = [np.array([[0.7]]), new_state]
         vad.session = mock_session
 
         vad(np.zeros(512, dtype=np.float32), 16000)
 
-        np.testing.assert_array_equal(vad._h, new_h)
-        np.testing.assert_array_equal(vad._c, new_c)
-
-
-class TestLoadOnnxModelCustomUrl:
-    def test_custom_url_skips_hash_verification(self, tmp_path):
-        """Test that a custom VAD model URL skips SHA-256 verification."""
-        import whisper_dictation.vad as vad_mod
-
-        original_model = vad_mod._model
-        vad_mod._model = None
-
-        mock_response = MagicMock()
-        mock_response.read.return_value = b"fake"
-        mock_response.__enter__ = MagicMock(return_value=mock_response)
-        mock_response.__exit__ = MagicMock(return_value=False)
-
-        try:
-            with (
-                patch("whisper_dictation.vad.OnnxVAD"),
-                patch("platformdirs.user_cache_dir", return_value=str(tmp_path)),
-                patch("urllib.request.urlopen", return_value=mock_response),
-                patch("whisper_dictation.vad._verify_model_hash") as mock_verify,
-                patch.dict("os.environ", {"DICTATION_VAD_MODEL_URL": "http://custom/model.onnx"}),
-                patch.dict("sys.modules", {"onnxruntime": MagicMock()}),
-            ):
-                vad_mod._load_onnx_model()
-                mock_verify.assert_not_called()
-        finally:
-            vad_mod._model = original_model
+        np.testing.assert_array_equal(vad._state, new_state)

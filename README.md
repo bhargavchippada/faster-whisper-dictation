@@ -225,6 +225,8 @@ device = "auto"          # "auto", "cuda", "cpu"
 | `DICTATION_VAD_SILENCE_MS` | `800` | Silence duration to end utterance (ms) |
 | `DICTATION_VAD_MIN_SPEECH_MS` | `250` | Minimum speech duration to accept (ms) |
 | `DICTATION_VAD_MAX_SPEECH_S` | `90.0` | Maximum single utterance duration (s) |
+| `DICTATION_VAD_MODEL_URL` | (pinned release) | Custom Silero VAD ONNX model URL |
+| `DICTATION_VAD_VERIFY_HASH` | `false` | Enable SHA-256 hash verification on model download |
 
 ## Architecture
 
@@ -305,7 +307,7 @@ faster-whisper-dictation start --server-url https://api.groq.com/openai
 - **No command injection** — all subprocess calls use list arguments, never `shell=True`. Windows clipboard uses Win32 API directly (no PowerShell). Wayland uses `--` separator to prevent flag injection.
 - **Clipboard hygiene** — previous clipboard is saved before paste and restored after via `finally` blocks, under a thread lock to prevent concurrent corruption.
 - **PID file locking** — exclusive `fcntl.flock` prevents duplicate daemon instances (falls back to simple PID on Windows).
-- **Model integrity** — ONNX VAD model is SHA-256 verified after download with a 60s timeout. Partial downloads are atomically cleaned up. Custom model URLs validated to use http/https.
+- **Model integrity** — ONNX VAD model downloads use a 60s timeout. SHA-256 verification is opt-in (`DICTATION_VAD_VERIFY_HASH=true`). Partial downloads are atomically cleaned up. Custom model URLs validated to use http/https.
 - **Config validation** — all values validated with clear error messages. Server URLs checked for http/https scheme. Invalid env vars rejected at startup.
 - **No network exposure** — Docker server binds to `127.0.0.1` only by default.
 - **No telemetry** — zero data collection, no phone-home, no analytics.

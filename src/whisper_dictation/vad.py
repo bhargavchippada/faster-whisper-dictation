@@ -15,14 +15,15 @@ log = logging.getLogger(__name__)
 # Silero VAD requires exactly 32ms audio windows for inference.
 _SILERO_CHUNK_MS = 32
 
-# Silero VAD ONNX model — pinned to a specific release for reproducibility.
-# Updated when a new faster-whisper-dictation version is released.
-# Users who need a different version can set DICTATION_VAD_MODEL_URL to override.
-_ONNX_MODEL_SHA256 = "1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3"
+# Silero VAD ONNX model — defaults to a known release.
+# Override URL with DICTATION_VAD_MODEL_URL env var.
+# Enable SHA-256 verification with DICTATION_VAD_VERIFY_HASH=true.
+_ONNX_MODEL_SHA256 = "2623a2953f6ff3d2c1e61740c6cdb7168133479b267dfef114a4a3cc5bdd788f"
 _DEFAULT_ONNX_MODEL_URL = (
     "https://github.com/snakers4/silero-vad/raw/v5.1.2/src/silero_vad/data/silero_vad.onnx"
 )
 _ONNX_MODEL_URL = os.environ.get("DICTATION_VAD_MODEL_URL", _DEFAULT_ONNX_MODEL_URL)
+_VERIFY_HASH = os.environ.get("DICTATION_VAD_VERIFY_HASH", "").lower() in ("1", "true", "yes")
 
 # Validate custom URL scheme at import time
 if _ONNX_MODEL_URL != _DEFAULT_ONNX_MODEL_URL:
@@ -93,14 +94,13 @@ def _load_onnx_model() -> None:
         cache.parent.mkdir(parents=True, exist_ok=True)
         tmp = cache.with_suffix(".tmp")
         log.info("Downloading Silero VAD ONNX model...")
-        is_custom_url = "DICTATION_VAD_MODEL_URL" in os.environ
         try:
             with urllib.request.urlopen(_ONNX_MODEL_URL, timeout=60) as resp:
                 tmp.write_bytes(resp.read())
-            if not is_custom_url:
+            if _VERIFY_HASH:
                 _verify_model_hash(tmp, _ONNX_MODEL_SHA256)
             else:
-                log.info("Custom VAD model URL — skipping SHA-256 verification")
+                log.debug("SHA-256 verification skipped (DICTATION_VAD_VERIFY_HASH=true to enable)")
             tmp.rename(cache)
         except Exception:
             tmp.unlink(missing_ok=True)
@@ -112,7 +112,11 @@ def _load_onnx_model() -> None:
 
 
 class OnnxVAD:
-    """Minimal Silero VAD wrapper using ONNX Runtime."""
+    """Minimal Silero VAD v5 wrapper using ONNX Runtime.
+
+    Silero VAD v5 uses a single 'state' tensor (shape [2, 1, 128]) instead
+    of separate 'h' and 'c' tensors used in v4.
+    """
 
     def __init__(self, model_path: str) -> None:
         import onnxruntime as ort
@@ -121,13 +125,11 @@ class OnnxVAD:
         opts.inter_op_num_threads = 1
         opts.intra_op_num_threads = 1
         self.session = ort.InferenceSession(model_path, sess_options=opts)
-        self._h = np.zeros((2, 1, 64), dtype=np.float32)
-        self._c = np.zeros((2, 1, 64), dtype=np.float32)
+        self._state = np.zeros((2, 1, 128), dtype=np.float32)
         self._sr = np.array(16000, dtype=np.int64)
 
     def reset_states(self) -> None:
-        self._h = np.zeros((2, 1, 64), dtype=np.float32)
-        self._c = np.zeros((2, 1, 64), dtype=np.float32)
+        self._state = np.zeros((2, 1, 128), dtype=np.float32)
 
     def __call__(self, audio: np.ndarray, sr: int) -> float:
         """Run VAD on a chunk, return speech probability (0.0-1.0)."""
@@ -139,13 +141,11 @@ class OnnxVAD:
 
         ort_inputs = {
             "input": audio,
-            "h": self._h,
-            "c": self._c,
+            "state": self._state,
             "sr": self._sr,
         }
-        out, hn, cn = self.session.run(None, ort_inputs)
-        self._h = hn
-        self._c = cn
+        out, new_state = self.session.run(None, ort_inputs)
+        self._state = new_state
         return float(out[0][0])
 
 
