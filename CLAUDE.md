@@ -52,6 +52,23 @@ src/whisper_dictation/
 - **Error resilience**: Transcription and typing exceptions are caught and logged without crashing the daemon. Audio stream start failures reset recording state and notify the user.
 - **AppleScript sanitization**: Notification messages strip null bytes and control characters before interpolation into AppleScript strings.
 
+## Daemon Management
+
+Before starting the daemon, ALWAYS clean up existing processes:
+
+```bash
+# 1. Graceful stop first
+faster-whisper-dictation stop
+
+# 2. Verify — kill any orphans left by crashes or background launches
+pgrep -f 'faster-whisper-dictation start' && pkill -f 'faster-whisper-dictation' || true
+
+# 3. Then start fresh
+faster-whisper-dictation start
+```
+
+Always try `faster-whisper-dictation stop` before resorting to `pkill`. Background `&` launches and crashes can leave orphan processes that `stop` won't find.
+
 ## Development
 
 ```bash

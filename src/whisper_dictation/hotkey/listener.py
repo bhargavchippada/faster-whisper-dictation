@@ -51,6 +51,7 @@ class HotkeyListener:
         self._listener = None
         self._stop_event = threading.Event()
         self._lock = threading.Lock()
+        self._last_toggle_time = 0.0
 
     def _use_evdev(self) -> bool:
         """Check if we should use evdev (Linux Wayland)."""
@@ -259,9 +260,16 @@ class HotkeyListener:
                     pass
 
     def _handle_press(self) -> None:
+        import time
+
         callback = None
         with self._lock:
             if self.mode == "toggle":
+                now = time.monotonic()
+                if now - self._last_toggle_time < 0.15:
+                    log.debug("Toggle debounce — ignoring duplicate press")
+                    return
+                self._last_toggle_time = now
                 if self._active:
                     self._active = False
                     log.debug("Toggle OFF")

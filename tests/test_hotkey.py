@@ -84,24 +84,27 @@ class TestToggleMode:
 
     def test_first_press_activates(self, toggle_listener):
         listener, activate, deactivate = toggle_listener
-        listener._handle_press()
+        with patch("time.monotonic", return_value=1.0):
+            listener._handle_press()
         assert listener._active is True
         activate.assert_called_once()
         deactivate.assert_not_called()
 
     def test_second_press_deactivates(self, toggle_listener):
         listener, activate, deactivate = toggle_listener
-        listener._handle_press()
-        listener._handle_press()
+        with patch("time.monotonic", side_effect=[1.0, 2.0]):
+            listener._handle_press()
+            listener._handle_press()
         assert listener._active is False
         activate.assert_called_once()
         deactivate.assert_called_once()
 
     def test_toggle_cycle(self, toggle_listener):
         listener, activate, deactivate = toggle_listener
-        listener._handle_press()  # ON
-        listener._handle_press()  # OFF
-        listener._handle_press()  # ON
+        with patch("time.monotonic", side_effect=[1.0, 2.0, 3.0]):
+            listener._handle_press()  # ON
+            listener._handle_press()  # OFF
+            listener._handle_press()  # ON
         assert listener._active is True
         assert activate.call_count == 2
         assert deactivate.call_count == 1
@@ -109,11 +112,32 @@ class TestToggleMode:
     def test_release_ignored_in_toggle_mode(self, toggle_listener):
         """_handle_release is a no-op in toggle mode."""
         listener, activate, deactivate = toggle_listener
-        listener._handle_press()
+        with patch("time.monotonic", return_value=1.0):
+            listener._handle_press()
         listener._handle_release()
         # In toggle mode, release should NOT deactivate — only a second press does
         assert listener._active is True
         deactivate.assert_not_called()
+
+    def test_toggle_debounce_ignores_rapid_press(self, toggle_listener):
+        """Rapid duplicate presses within 150ms are debounced."""
+        listener, activate, deactivate = toggle_listener
+        with patch("time.monotonic", side_effect=[1.0, 1.05]):
+            listener._handle_press()  # ON at 1.0
+            listener._handle_press()  # 50ms later — debounced, still ON
+        assert listener._active is True
+        activate.assert_called_once()
+        deactivate.assert_not_called()
+
+    def test_toggle_debounce_allows_after_threshold(self, toggle_listener):
+        """Presses after 150ms debounce window are accepted."""
+        listener, activate, deactivate = toggle_listener
+        with patch("time.monotonic", side_effect=[1.0, 1.2]):
+            listener._handle_press()  # ON at 1.0
+            listener._handle_press()  # 200ms later — accepted, OFF
+        assert listener._active is False
+        activate.assert_called_once()
+        deactivate.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
