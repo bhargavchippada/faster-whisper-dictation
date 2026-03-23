@@ -27,6 +27,13 @@ def _http_to_ws_url(http_url: str) -> str:
     return urlunparse(parsed._replace(scheme=scheme))
 
 
+def _is_loopback(url: str) -> bool:
+    """Check if URL points to a loopback address."""
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    return host in ("localhost", "127.0.0.1", "::1", "")
+
+
 def _build_config_message(
     *,
     uid: str,
@@ -70,8 +77,9 @@ class WebSocketEngine:
     5. Receive JSON segments with completed/partial flags
     6. Send END_OF_AUDIO text frame when done
 
-    This does NOT implement TranscriptionEngine ABC — async callbacks
-    vs synchronous request/response.
+    This does NOT implement TranscriptionEngine ABC — the async callback-based
+    push model (text arrives mid-stream) is incompatible with the synchronous
+    request/response interface of TranscriptionEngine.transcribe().
     """
 
     def __init__(
@@ -100,10 +108,12 @@ class WebSocketEngine:
         self._receiver_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._connected = threading.Event()
+        self._server_ready = threading.Event()
         self._flush_done = threading.Event()
 
-        # Track last emitted text to only type new content
-        self._last_emitted = ""
+        # Only emit text from completed segments to avoid typing
+        # partial text that the server later corrects.
+        self._emitted_count = 0  # number of completed segments already typed
 
     @property
     def ws_url(self) -> str:
@@ -114,8 +124,20 @@ class WebSocketEngine:
         """Open WebSocket connection with retry, send config, start threads."""
         self._stop_event.clear()
         self._connected.clear()
-        self._last_emitted = ""
+        self._server_ready.clear()
+        self._flush_done.clear()
+        self._emitted_count = 0
         self._uid = str(uuid.uuid4())
+
+        # Warn on unencrypted non-localhost connections
+        if not _is_loopback(self._server_url):
+            ws_url = self.ws_url
+            if ws_url.startswith("ws://"):
+                log.warning(
+                    "WebSocket connection to non-localhost %s uses unencrypted ws://. "
+                    "Consider using https:// (wss://) for remote servers.",
+                    self._server_url,
+                )
 
         last_error: Exception | None = None
         attempts = self._reconnect_attempts + 1
@@ -137,7 +159,10 @@ class WebSocketEngine:
                     time.sleep(self._reconnect_delay)
 
         if self._ws is None:
-            log.error("WebSocket connection failed after %d attempts: %s", attempts, self.ws_url)
+            log.error(
+                "WebSocket connection failed after %d attempts: %s",
+                attempts, self.ws_url,
+            )
             raise last_error  # type: ignore[misc]
 
         # Send WhisperLive config handshake
@@ -157,6 +182,10 @@ class WebSocketEngine:
         self._sender_thread = threading.Thread(target=self._sender_loop, daemon=True)
         self._sender_thread.start()
 
+        # Wait for SERVER_READY before allowing audio
+        if not self._server_ready.wait(timeout=10.0):
+            log.warning("WhisperLive did not send SERVER_READY within 10s, proceeding anyway")
+
         self._connected.set()
         log.info("WebSocket connected: %s (uid=%s)", self.ws_url, self._uid[:8])
 
@@ -175,11 +204,10 @@ class WebSocketEngine:
         if not self._connected.is_set():
             return
         self._flush_done.clear()
-        # Queue a sentinel bytes value that sender recognizes as END_OF_AUDIO
         try:
             self._send_queue.put_nowait(b"__END__")
         except queue.Full:
-            pass
+            log.warning("Send queue full, END_OF_AUDIO dropped")
 
     def wait_for_completion(self, timeout: float = 5.0) -> bool:
         """Wait for server to finish processing after flush."""
@@ -190,7 +218,6 @@ class WebSocketEngine:
         self._stop_event.set()
         self._connected.clear()
 
-        # Signal sender to exit
         try:
             self._send_queue.put_nowait(None)
         except queue.Full:
@@ -241,7 +268,7 @@ class WebSocketEngine:
                 continue
 
             if data is None:
-                break  # shutdown signal
+                break
 
             ws = self._ws
             if ws is None:
@@ -272,7 +299,6 @@ class WebSocketEngine:
                     log.debug("WebSocket recv error", exc_info=True)
                 break
 
-            # WhisperLive sends JSON text frames
             if isinstance(raw, bytes):
                 log.debug("WS binary frame ignored (%d bytes)", len(raw))
                 continue
@@ -280,65 +306,69 @@ class WebSocketEngine:
             try:
                 msg = json.loads(raw)
             except (json.JSONDecodeError, TypeError):
-                log.debug("Invalid JSON from WebSocket: %r", raw[:200] if raw else raw)
+                log.debug("Invalid JSON: %r", raw[:200] if raw else raw)
                 continue
 
-            self._handle_message(msg)
+            try:
+                self._handle_message(msg)
+            except Exception:
+                log.warning("Error handling WS message", exc_info=True)
 
     def _handle_message(self, msg: dict) -> None:
         """Process a WhisperLive JSON message."""
-        # SERVER_READY handshake response
-        if msg.get("message") == "SERVER_READY":
-            log.debug("WS server ready (backend=%s)", msg.get("backend", "?"))
+        if not isinstance(msg, dict):
             return
 
-        # WAIT message (server busy)
+        if msg.get("message") == "SERVER_READY":
+            log.debug("WS server ready (backend=%s)", msg.get("backend", "?"))
+            self._server_ready.set()
+            return
+
         if msg.get("status") == "WAIT":
             log.warning("WS server busy, wait %s minutes", msg.get("message", "?"))
             return
 
-        # Transcription segments
         segments = msg.get("segments")
-        if segments is not None:
+        if isinstance(segments, list):
             self._process_segments(segments)
             return
 
-        # Language detection
         if "language" in msg and "language_prob" in msg:
-            log.debug("WS detected language: %s (%.0f%%)", msg["language"], msg["language_prob"] * 100)
+            try:
+                prob = float(msg["language_prob"]) * 100
+                log.debug("WS detected language: %s (%.0f%%)", msg["language"], prob)
+            except (TypeError, ValueError):
+                log.debug("WS language detection: %s", msg.get("language"))
             return
 
         log.debug("WS unhandled message: %s", str(msg)[:200])
 
-    def _process_segments(self, segments: list[dict]) -> None:
-        """Process transcription segments and emit new text.
+    def _process_segments(self, segments: list) -> None:
+        """Process transcription segments — emit only completed (finalized) text.
 
-        WhisperLive segments have:
-        - text: the transcribed text
-        - completed: True if finalized, False if partial/interim
-
-        We concatenate all segment text and emit only the new portion
-        (diff against what was previously emitted).
+        WhisperLive can revise partial segments, so we only type text from
+        segments marked completed=True to avoid typing incorrect text that
+        would need correction (keyboard input cannot be recalled).
         """
-        if not segments:
+        # Filter to valid dict segments
+        valid = [s for s in segments if isinstance(s, dict)]
+        if not valid:
             return
 
-        # Build full text from all segments
-        full_text = " ".join(seg.get("text", "").strip() for seg in segments).strip()
-        if not full_text:
-            return
+        # Count completed segments and emit newly completed ones
+        completed = [s for s in valid if s.get("completed", False)]
+        new_completed = completed[self._emitted_count:]
 
-        # Check if the last segment is completed (final)
-        last_completed = segments[-1].get("completed", False)
+        for seg in new_completed:
+            text = seg.get("text", "").strip()
+            if text:
+                log.debug("WS text (final): %s", text[:80])
+                self._on_text(text)
 
-        # Emit only new text (diff from last emitted)
-        if len(full_text) > len(self._last_emitted):
-            new_text = full_text[len(self._last_emitted):].strip()
-            if new_text:
-                log.debug("WS text (%s): %s", "final" if last_completed else "partial", new_text[:80])
-                self._on_text(new_text)
-                self._last_emitted = full_text
+        self._emitted_count = len(completed)
 
-        # Signal completion when all segments are finalized
-        if last_completed:
+        # Signal flush done when we have at least one completed segment
+        # after a flush (END_OF_AUDIO triggers final transcription)
+        last_seg = valid[-1]
+        if last_seg.get("completed", False):
             self._flush_done.set()

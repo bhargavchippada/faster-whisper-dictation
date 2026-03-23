@@ -302,7 +302,7 @@ _DEFAULT_CONFIG_TEMPLATE = """\
 # See: https://github.com/bhargavchippada/faster-whisper-dictation
 
 [server]
-url = "http://localhost:10300"        # Whisper server URL
+url = "http://localhost:9090"         # WhisperLive server URL
 model = "Systran/faster-whisper-large-v3"
 language = "en"                       # Language code (e.g. "en", "es", "de")
 timeout = 10                          # Request timeout in seconds

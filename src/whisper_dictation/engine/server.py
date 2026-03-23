@@ -15,7 +15,7 @@ log = logging.getLogger(__name__)
 
 
 class ServerEngine(TranscriptionEngine):
-    """Transcription via REST API (Speaches, OpenAI, Groq, etc.)."""
+    """Transcription via REST API (WhisperLive, OpenAI-compatible STT, etc.)."""
 
     def __init__(self, config: ServerConfig):
         self.config = config
