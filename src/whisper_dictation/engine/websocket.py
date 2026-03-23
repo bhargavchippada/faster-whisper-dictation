@@ -7,6 +7,7 @@ import json
 import logging
 import queue
 import threading
+import time
 from collections.abc import Callable
 from urllib.parse import urlparse, urlunparse
 
@@ -14,6 +15,9 @@ import numpy as np
 import websockets.sync.client as ws_sync
 
 log = logging.getLogger(__name__)
+
+# Max queued audio messages before dropping (~3s at 32ms chunks)
+_MAX_SEND_QUEUE = 100
 
 
 def _http_to_ws_url(http_url: str) -> str:
@@ -57,8 +61,8 @@ def _build_audio_commit() -> dict:
 
 
 def _encode_audio_b64(audio: np.ndarray) -> str:
-    """Encode float32 audio as base64 PCM int16."""
-    if audio.dtype == np.float32:
+    """Encode audio as base64 PCM int16."""
+    if audio.dtype in (np.float32, np.float64):
         pcm = (audio * 32768).clip(-32768, 32767).astype(np.int16)
     else:
         pcm = audio.astype(np.int16)
@@ -98,11 +102,12 @@ class WebSocketEngine:
         self._on_text = on_text
 
         self._ws = None
-        self._send_queue: queue.Queue[str | None] = queue.Queue()
+        self._send_queue: queue.Queue[str | None] = queue.Queue(maxsize=_MAX_SEND_QUEUE)
         self._sender_thread: threading.Thread | None = None
         self._receiver_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._connected = threading.Event()
+        self._flush_done = threading.Event()  # set when server finishes processing after commit
 
     @property
     def ws_url(self) -> str:
@@ -114,15 +119,32 @@ class WebSocketEngine:
         return url
 
     def connect(self) -> None:
-        """Open WebSocket connection and start sender/receiver threads."""
+        """Open WebSocket connection with retry, start sender/receiver threads."""
         self._stop_event.clear()
         self._connected.clear()
 
-        try:
-            self._ws = ws_sync.connect(self.ws_url)
-        except Exception:
-            log.error("WebSocket connection failed: %s", self.ws_url, exc_info=True)
-            raise
+        last_error: Exception | None = None
+        attempts = self._reconnect_attempts + 1  # first attempt + retries
+
+        for attempt in range(attempts):
+            try:
+                self._ws = ws_sync.connect(self.ws_url)
+                break
+            except Exception as e:
+                last_error = e
+                if attempt < attempts - 1:
+                    log.warning(
+                        "WebSocket connect attempt %d/%d failed: %s, retrying in %.1fs",
+                        attempt + 1,
+                        attempts,
+                        e,
+                        self._reconnect_delay,
+                    )
+                    time.sleep(self._reconnect_delay)
+
+        if self._ws is None:
+            log.error("WebSocket connection failed after %d attempts: %s", attempts, self.ws_url)
+            raise last_error  # type: ignore[misc]
 
         # Send session configuration
         session_msg = _build_session_update(
@@ -157,11 +179,16 @@ class WebSocketEngine:
         """Send commit message to trigger server-side processing of remaining audio."""
         if not self._connected.is_set():
             return
+        self._flush_done.clear()
         msg = json.dumps(_build_audio_commit())
         try:
             self._send_queue.put_nowait(msg)
         except queue.Full:
             pass
+
+    def wait_for_completion(self, timeout: float = 5.0) -> bool:
+        """Wait for server to finish processing after flush. Returns True if completed."""
+        return self._flush_done.wait(timeout=timeout)
 
     def close(self) -> None:
         """Close WebSocket connection and stop threads."""
@@ -174,21 +201,27 @@ class WebSocketEngine:
         except queue.Full:
             pass
 
-        if self._ws is not None:
+        # Close WS — unblocks recv() in receiver thread
+        ws = self._ws
+        self._ws = None
+        if ws is not None:
             try:
-                self._ws.close()
+                ws.close()
             except Exception:
                 log.debug("WebSocket close error", exc_info=True)
-            self._ws = None
 
         if self._sender_thread is not None:
             self._sender_thread.join(timeout=2.0)
+            if self._sender_thread.is_alive():
+                log.warning("WebSocket sender thread did not exit within timeout")
             self._sender_thread = None
         if self._receiver_thread is not None:
             self._receiver_thread.join(timeout=2.0)
+            if self._receiver_thread.is_alive():
+                log.warning("WebSocket receiver thread did not exit within timeout")
             self._receiver_thread = None
 
-        # Drain the queue
+        # Drain remaining queued items
         while not self._send_queue.empty():
             try:
                 self._send_queue.get_nowait()
@@ -217,11 +250,12 @@ class WebSocketEngine:
             if msg is None:
                 break  # shutdown signal
 
-            if self._ws is None:
+            ws = self._ws  # capture locally to avoid TOCTOU
+            if ws is None:
                 break
 
             try:
-                self._ws.send(msg)
+                ws.send(msg)
             except Exception:
                 log.debug("WebSocket send failed", exc_info=True)
                 break
@@ -229,11 +263,12 @@ class WebSocketEngine:
     def _receiver_loop(self) -> None:
         """Receive messages from WebSocket and dispatch."""
         while not self._stop_event.is_set():
-            if self._ws is None:
+            ws = self._ws  # capture locally to avoid TOCTOU
+            if ws is None:
                 break
 
             try:
-                raw = self._ws.recv(timeout=0.5)
+                raw = ws.recv(timeout=0.5)
             except TimeoutError:
                 continue
             except Exception:
@@ -257,9 +292,9 @@ class WebSocketEngine:
             if transcript:
                 log.debug("WS transcription: %s", transcript[:80])
                 self._on_text(transcript)
+            self._flush_done.set()
 
         elif msg_type == "conversation.item.input_audio_transcription.delta":
-            # Partial/delta text — could be used for live preview in future
             delta = msg.get("delta", "")
             log.debug("WS delta: %s", delta[:80] if delta else "")
 

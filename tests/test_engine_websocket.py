@@ -94,6 +94,14 @@ class TestEncodeAudioB64:
         assert pcm[0] == 100
         assert pcm[1] == -100
 
+    def test_float64_encoding(self):
+        audio = np.array([0.5, -0.5], dtype=np.float64)
+        b64 = _encode_audio_b64(audio)
+        decoded = base64.b64decode(b64)
+        pcm = np.frombuffer(decoded, dtype=np.int16)
+        assert pcm[0] == 16384
+        assert pcm[1] == -16384
+
     def test_clipping(self):
         audio = np.array([1.5, -1.5], dtype=np.float32)
         b64 = _encode_audio_b64(audio)
@@ -167,6 +175,7 @@ class TestWebSocketEngineConnect:
             server_url="http://localhost:99999",
             model="tiny",
             language="en",
+            reconnect_attempts=0,
             on_text=MagicMock(),
         )
 
@@ -176,6 +185,45 @@ class TestWebSocketEngineConnect:
                 engine.connect()
 
         assert not engine._connected.is_set()
+
+    def test_connect_retries_on_failure(self):
+        """Connect retries up to reconnect_attempts before raising."""
+        engine = WebSocketEngine(
+            server_url="http://localhost:10300",
+            model="tiny",
+            language="en",
+            reconnect_attempts=2,
+            reconnect_delay=0.01,
+            on_text=MagicMock(),
+        )
+
+        with patch("whisper_dictation.engine.websocket.ws_sync") as mock_ws_mod:
+            mock_ws_mod.connect.side_effect = ConnectionRefusedError("refused")
+            with pytest.raises(ConnectionRefusedError):
+                engine.connect()
+
+        # 1 initial + 2 retries = 3 total attempts
+        assert mock_ws_mod.connect.call_count == 3
+
+    def test_connect_succeeds_on_retry(self):
+        """Connect succeeds after initial failure."""
+        mock_ws = MagicMock()
+        engine = WebSocketEngine(
+            server_url="http://localhost:10300",
+            model="tiny",
+            language="en",
+            reconnect_attempts=2,
+            reconnect_delay=0.01,
+            on_text=MagicMock(),
+        )
+
+        with patch("whisper_dictation.engine.websocket.ws_sync") as mock_ws_mod:
+            mock_ws_mod.connect.side_effect = [ConnectionRefusedError("fail"), mock_ws]
+            engine.connect()
+
+        assert engine._connected.is_set()
+        assert mock_ws_mod.connect.call_count == 2
+        engine.close()
 
 
 class TestWebSocketEngineSendAudio:
@@ -195,6 +243,24 @@ class TestWebSocketEngineSendAudio:
         parsed = json.loads(msg)
         assert parsed["type"] == "input_audio_buffer.append"
         assert "audio" in parsed
+
+    def test_send_audio_drops_when_queue_full(self):
+        """Audio is silently dropped when queue is full."""
+        engine = WebSocketEngine(
+            server_url="http://localhost:10300",
+            model="tiny",
+            language="en",
+            on_text=MagicMock(),
+        )
+        engine._connected.set()
+
+        # Fill the queue
+        for _ in range(engine._send_queue.maxsize):
+            engine.send_audio(np.zeros(16, dtype=np.float32))
+
+        # This should not raise — just drops
+        engine.send_audio(np.zeros(16, dtype=np.float32))
+        assert engine._send_queue.full()
 
     def test_send_audio_when_disconnected_is_noop(self):
         engine = WebSocketEngine(

@@ -111,7 +111,8 @@ class DictationDaemon:
             self._recording = True
             self._recorded_chunks.clear()
 
-        log.info("Recording started")
+        log.info("Recording started (use_ws=%s, streaming=%s, engine=%s)",
+                 self._use_ws, self.streaming, self.config.engine.type)
         notify("Recording", "Speak now")
 
         if self._use_ws:
@@ -171,6 +172,9 @@ class DictationDaemon:
 
         if self._use_ws and self._ws_engine is not None:
             self._ws_engine.flush()
+            # Wait for server to finish transcribing before closing
+            if not self._ws_engine.wait_for_completion(timeout=5.0):
+                log.debug("WS transcription did not complete within timeout")
             self._ws_engine.close()
             self._ws_engine = None
         elif self.streaming:
