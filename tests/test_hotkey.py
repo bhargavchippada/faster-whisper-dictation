@@ -294,6 +294,17 @@ class TestStartStop:
         listener.start()
         mock_start_evdev.assert_called_once()
 
+    @patch("whisper_dictation.hotkey.listener.HotkeyListener._start_pynput")
+    @patch("whisper_dictation.hotkey.listener.HotkeyListener._use_evdev", return_value=False)
+    def test_start_clears_previous_stop_request(self, mock_evdev, mock_start_pynput):
+        listener = HotkeyListener("alt+v", "toggle", MagicMock(), MagicMock())
+        listener._stop_event.set()
+
+        listener.start()
+
+        assert not listener._stop_event.is_set()
+        mock_start_pynput.assert_called_once()
+
     def test_stop_without_listener(self):
         listener = HotkeyListener("alt+v", "toggle", MagicMock(), MagicMock())
         # Should not raise
@@ -307,6 +318,16 @@ class TestStartStop:
         listener.stop()
         mock_listener.stop.assert_called_once()
         assert listener._listener is None
+
+    def test_stop_joins_evdev_thread(self):
+        listener = HotkeyListener("alt+v", "toggle", MagicMock(), MagicMock())
+        mock_thread = MagicMock()
+        listener._thread = mock_thread
+
+        listener.stop()
+
+        mock_thread.join.assert_called_once_with(timeout=1.5)
+        assert listener._thread is None
 
     def test_stop_exception_in_listener_stop(self):
         listener = HotkeyListener("alt+v", "toggle", MagicMock(), MagicMock())
@@ -533,19 +554,28 @@ class TestThrottleXlib:
         """Test throttle patches Xlib Display.send_and_recv."""
         from Xlib.protocol.display import Display
 
+        import whisper_dictation.hotkey.listener as mod
+
         original = Display.send_and_recv
+        saved_flag = mod._throttle_applied
+        mod._throttle_applied = False
         try:
             HotkeyListener._throttle_xlib()
             assert Display.send_and_recv is not original
             assert getattr(Display.send_and_recv, "_throttled", False)
         finally:
             Display.send_and_recv = original
+            mod._throttle_applied = saved_flag
 
     def test_idempotent(self):
         """Test throttle only patches once."""
         from Xlib.protocol.display import Display
 
+        import whisper_dictation.hotkey.listener as mod
+
         original = Display.send_and_recv
+        saved_flag = mod._throttle_applied
+        mod._throttle_applied = False
         try:
             HotkeyListener._throttle_xlib()
             first = Display.send_and_recv
@@ -553,6 +583,7 @@ class TestThrottleXlib:
             assert Display.send_and_recv is first  # not double-wrapped
         finally:
             Display.send_and_recv = original
+            mod._throttle_applied = saved_flag
 
     def test_noop_when_no_xlib(self):
         """Test throttle is a safe no-op when Xlib is not installed."""

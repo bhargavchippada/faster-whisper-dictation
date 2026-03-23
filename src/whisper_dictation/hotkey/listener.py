@@ -165,6 +165,11 @@ class HotkeyListener:
             self._thread.join(timeout=1.5)
             self._thread = None
 
+    @staticmethod
+    def _throttle_xlib() -> None:
+        """Backward-compatible wrapper around the module-level pynput throttle."""
+        _throttle_pynput_xrecord()
+
     def _start_pynput(self) -> None:
         """Start hotkey listener using pynput."""
         if sys.platform == "linux" and os.environ.get("XDG_SESSION_TYPE", "x11") == "x11":
