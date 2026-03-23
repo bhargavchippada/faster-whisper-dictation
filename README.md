@@ -6,7 +6,9 @@
 
 Real-time speech-to-text dictation powered by [faster-whisper](https://github.com/SYSTRAN/faster-whisper). Speak and watch text appear instantly in any application — fully offline, no cloud APIs, no data leaves your machine.
 
-![Demo: server mode with hold-to-talk](https://raw.githubusercontent.com/bhargavchippada/faster-whisper-dictation/feat/python-package/assets/demo-server.gif)
+<p align="center">
+  <img src="https://raw.githubusercontent.com/bhargavchippada/faster-whisper-dictation/main/assets/demo-server.gif" alt="Demo: server mode with hold-to-talk" width="740">
+</p>
 
 ## How it works
 
