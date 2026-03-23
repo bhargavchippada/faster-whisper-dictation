@@ -192,7 +192,19 @@ class TestOnActivate:
         assert daemon._recording is True
         mock_audio_cls.assert_called_once()
         mock_audio.start.assert_called_once()
-        mock_notify.assert_called_with("Recording...", "Speak now")
+
+    @patch("whisper_dictation.daemon.notify")
+    @patch("whisper_dictation.daemon.AudioStream")
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_activate_streaming_resets_vad(self, mock_create, mock_audio_cls, mock_notify):
+        """Streaming mode: activate resets VAD state."""
+        mock_create.return_value = MagicMock()
+        mock_audio_cls.return_value = MagicMock()
+        daemon = DictationDaemon(Config(), streaming=True)
+
+        with patch.object(daemon._vad, "reset") as mock_reset:
+            daemon._on_activate()
+            mock_reset.assert_called_once()
 
     @patch("whisper_dictation.daemon.notify")
     @patch("whisper_dictation.daemon.AudioStream")
@@ -246,7 +258,6 @@ class TestOnDeactivate:
         assert daemon._recording is False
         mock_audio.stop.assert_called_once()
         assert daemon._audio is None
-        mock_notify.assert_called_with("Stopped", "Dictation paused")
 
     @patch("whisper_dictation.daemon.notify")
     @patch("whisper_dictation.daemon.create_engine")
@@ -264,9 +275,9 @@ class TestOnDeactivate:
     @patch("whisper_dictation.daemon.notify")
     @patch("whisper_dictation.daemon.create_engine")
     def test_deactivate_flushes_speech_via_vad_flush(self, mock_create, mock_notify, mock_thread):
-        """Test _on_deactivate uses vad.flush() and spawns transcription thread."""
+        """Test streaming mode _on_deactivate uses vad.flush()."""
         mock_create.return_value = MagicMock()
-        daemon = DictationDaemon(Config())
+        daemon = DictationDaemon(Config(), streaming=True)
         daemon._recording = True
         daemon._audio = MagicMock()
 
@@ -288,9 +299,9 @@ class TestOnDeactivate:
     @patch("whisper_dictation.daemon.notify")
     @patch("whisper_dictation.daemon.create_engine")
     def test_deactivate_no_flush_when_vad_returns_none(self, mock_create, mock_notify, mock_thread):
-        """Test _on_deactivate does NOT spawn thread when vad.flush() returns None."""
+        """Streaming: no thread when vad.flush() returns None."""
         mock_create.return_value = MagicMock()
-        daemon = DictationDaemon(Config())
+        daemon = DictationDaemon(Config(), streaming=True)
         daemon._recording = True
         daemon._audio = MagicMock()
 
@@ -298,9 +309,46 @@ class TestOnDeactivate:
         daemon._vad.flush.return_value = None
 
         daemon._on_deactivate()
-
-        # Thread should NOT be spawned
         mock_thread.assert_not_called()
+
+    @patch("whisper_dictation.daemon.threading.Thread")
+    @patch("whisper_dictation.daemon.notify")
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_deactivate_batch_transcribes_full_audio(self, mock_create, mock_notify, mock_thread):
+        """Batch mode: deactivate concatenates chunks and transcribes."""
+        mock_create.return_value = MagicMock()
+        daemon = DictationDaemon(Config())
+        daemon._recording = True
+        daemon._audio = MagicMock()
+        daemon._recorded_chunks = [
+            np.ones(512, dtype=np.float32),
+            np.ones(512, dtype=np.float32),
+        ]
+
+        daemon._on_deactivate()
+
+        mock_thread.assert_called_once()
+        call_kwargs = mock_thread.call_args[1]
+        assert call_kwargs["target"] == daemon._transcribe_and_type
+        # Full audio should be concatenated (1024 samples)
+        audio_arg = mock_thread.call_args[1]["args"][0]
+        assert len(audio_arg) == 1024
+
+    @patch("whisper_dictation.daemon.threading.Thread")
+    @patch("whisper_dictation.daemon.notify")
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_deactivate_batch_no_chunks(self, mock_create, mock_notify, mock_thread):
+        """Batch mode: no thread when no audio was recorded."""
+        mock_create.return_value = MagicMock()
+        daemon = DictationDaemon(Config())
+        daemon._recording = True
+        daemon._audio = MagicMock()
+        daemon._recorded_chunks = []
+
+        daemon._on_deactivate()
+
+        mock_thread.assert_not_called()
+        mock_notify.assert_any_call("No speech", "No audio recorded")
 
 
 # ---------------------------------------------------------------------------
@@ -322,9 +370,24 @@ class TestOnAudioChunk:
 
     @patch("whisper_dictation.daemon.threading.Thread")
     @patch("whisper_dictation.daemon.create_engine")
-    def test_complete_utterance_spawns_thread(self, mock_create, mock_thread):
+    def test_batch_mode_accumulates_chunks(self, mock_create, mock_thread):
+        """Batch mode: audio chunks are accumulated, not transcribed immediately."""
         mock_create.return_value = MagicMock()
         daemon = DictationDaemon(Config())
+        daemon._recording = True
+
+        daemon._on_audio_chunk(np.zeros(512, dtype=np.float32))
+        daemon._on_audio_chunk(np.ones(512, dtype=np.float32))
+
+        assert len(daemon._recorded_chunks) == 2
+        mock_thread.assert_not_called()
+
+    @patch("whisper_dictation.daemon.threading.Thread")
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_streaming_mode_spawns_thread_on_utterance(self, mock_create, mock_thread):
+        """Streaming mode: completed utterance spawns transcription thread."""
+        mock_create.return_value = MagicMock()
+        daemon = DictationDaemon(Config(), streaming=True)
         daemon._recording = True
 
         utterance = np.zeros(16000, dtype=np.float32)
@@ -334,7 +397,6 @@ class TestOnAudioChunk:
         mock_thread.assert_called_once()
         call_kwargs = mock_thread.call_args[1]
         assert call_kwargs["target"] == daemon._transcribe_and_type
-        assert call_kwargs["daemon"] is True
 
     @patch("whisper_dictation.daemon.create_engine")
     def test_no_utterance_no_thread(self, mock_create):
@@ -351,14 +413,12 @@ class TestOnAudioChunk:
 
     @patch("whisper_dictation.daemon.create_engine")
     def test_vad_exception_logged_not_raised(self, mock_create):
-        """Test _on_audio_chunk catches VAD processing exceptions."""
+        """Test streaming _on_audio_chunk catches VAD processing exceptions."""
         mock_create.return_value = MagicMock()
-        daemon = DictationDaemon(Config())
+        daemon = DictationDaemon(Config(), streaming=True)
         daemon._recording = True
 
-        with patch.object(
-            daemon._vad, "process_chunk", side_effect=RuntimeError("VAD error")
-        ):
+        with patch.object(daemon._vad, "process_chunk", side_effect=RuntimeError("VAD error")):
             # Should not raise
             daemon._on_audio_chunk(np.zeros(512, dtype=np.float32))
 

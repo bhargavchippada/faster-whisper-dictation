@@ -285,6 +285,8 @@ class TestTomllibImport:
                 import whisper_dictation.config as config_mod
 
                 importlib.reload(config_mod)
+                # Verify the fallback was actually used
+                assert config_mod.tomllib is mock_tomli
         finally:
             # Restore original module
             if saved_config is not None:

@@ -279,6 +279,45 @@ class TestModelLoading:
 
 
 # ---------------------------------------------------------------------------
+# ring buffer
+# ---------------------------------------------------------------------------
+
+
+class TestRingBuffer:
+    def test_ring_buffer_fills_during_silence(self):
+        """Ring buffer accumulates chunks when not speaking."""
+        det = SpeechDetector()
+        mock_model = MagicMock(return_value=0.1)  # below threshold
+
+        with patch("whisper_dictation.vad._model", mock_model):
+            det._model_loaded = True
+            # Feed enough silent chunks to fill the ring buffer
+            for _ in range(20):
+                det.process_chunk(np.zeros(det.chunk_size, dtype=np.float32))
+
+        # Ring buffer should be capped at _pre_speech_chunks
+        assert len(det._ring_buffer) == det._pre_speech_chunks
+
+    def test_ring_buffer_prepended_to_speech(self):
+        """Ring buffer contents are prepended when speech starts."""
+        det = SpeechDetector()
+        call_count = [0]
+
+        def mock_vad(audio, sr):
+            call_count[0] += 1
+            # First 5 calls: silence, then speech
+            return 0.1 if call_count[0] <= 5 else 0.9
+
+        with patch("whisper_dictation.vad._model", mock_vad):
+            det._model_loaded = True
+            for _ in range(10):
+                det.process_chunk(np.zeros(det.chunk_size, dtype=np.float32))
+
+        # Speech frames should include pre-speech buffer + speech chunks
+        assert len(det._speech_frames) > 5  # more than just the speech chunks
+
+
+# ---------------------------------------------------------------------------
 # flush
 # ---------------------------------------------------------------------------
 

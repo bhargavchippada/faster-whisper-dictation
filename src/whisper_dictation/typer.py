@@ -33,7 +33,11 @@ def _detect_display() -> str:
 
 
 def _type_linux_x11(text: str) -> None:
-    """Type via xdotool + xclip on X11."""
+    """Type via clipboard paste on X11.
+
+    Uses xclip to set clipboard, then xdotool to send Ctrl+Shift+V
+    (works in both terminals and editors). Preserves previous clipboard.
+    """
     prev = subprocess.run(
         ["xclip", "-selection", "clipboard", "-o"],
         capture_output=True,
@@ -47,8 +51,9 @@ def _type_linux_x11(text: str) -> None:
         check=False,
     )
     try:
+        # Ctrl+Shift+V works in terminals AND editors
         subprocess.run(
-            ["xdotool", "key", "--clearmodifiers", "ctrl+v"],
+            ["xdotool", "key", "--clearmodifiers", "ctrl+shift+v"],
             check=False,
         )
         time.sleep(PASTE_DELAY)
@@ -100,15 +105,18 @@ def _type_macos(text: str) -> None:
 
 def _type_windows(text: str) -> None:
     """Type via clipboard + keyboard simulation on Windows."""
+    prev = _win_clipboard_get()
     try:
-        # Save clipboard, set new text, paste, restore — all via Win32 API
-        prev = _win_clipboard_get()
         _win_clipboard_set(text)
         _send_ctrl_v()
         time.sleep(PASTE_DELAY)
-        _win_clipboard_set(prev)
     except Exception:
         log.error("Windows typing failed", exc_info=True)
+    finally:
+        try:
+            _win_clipboard_set(prev)
+        except Exception:
+            log.debug("Failed to restore clipboard", exc_info=True)
 
 
 _CF_UNICODETEXT = 13

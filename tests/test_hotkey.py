@@ -351,17 +351,43 @@ class TestStartPynput:
         mock_keyboard = self._make_mock_keyboard()
         on_press, on_release = self._start_with_mock(listener, mock_keyboard)
 
-        # Press alt, then v to activate
-        on_press(mock_keyboard.Key.alt)
-        mock_v_key = MagicMock()
-        mock_v_key.char = "v"
-        mock_v_key.name = "v"
-        on_press(mock_v_key)
-        activate.assert_called_once()
+        # Use monotonic mock to simulate >50ms elapsed (bypasses debounce)
+        time_values = iter([1.0, 1.1])  # press at 1.0, release check at 1.1 (100ms gap)
+        with patch("time.monotonic", side_effect=time_values):
+            # Press alt, then v to activate
+            on_press(mock_keyboard.Key.alt)
+            mock_v_key = MagicMock()
+            mock_v_key.char = "v"
+            mock_v_key.name = "v"
+            on_press(mock_v_key)
+            activate.assert_called_once()
 
-        # Release v -> should deactivate in hold mode
-        on_release(mock_v_key)
+            # Release v -> should deactivate in hold mode
+            on_release(mock_v_key)
         deactivate.assert_called_once()
+
+    def test_pynput_on_release_hold_mode_debounce_ignores_rapid_release(self):
+        """Test hold mode ignores release within 50ms of press (debounce)."""
+        activate = MagicMock()
+        deactivate = MagicMock()
+        listener = HotkeyListener("alt+v", "hold", activate, deactivate)
+
+        mock_keyboard = self._make_mock_keyboard()
+        on_press, on_release = self._start_with_mock(listener, mock_keyboard)
+
+        # Simulate rapid press/release (auto-repeat): elapsed < 50ms
+        time_values = iter([1.0, 1.01])  # 10ms gap — should be debounced
+        with patch("time.monotonic", side_effect=time_values):
+            on_press(mock_keyboard.Key.alt)
+            mock_v_key = MagicMock()
+            mock_v_key.char = "v"
+            mock_v_key.name = "v"
+            on_press(mock_v_key)
+            activate.assert_called_once()
+
+            # Release v within debounce window — should NOT deactivate
+            on_release(mock_v_key)
+        deactivate.assert_not_called()
 
     def test_pynput_on_release_modifier_hold_mode_deactivates(self):
         """Test releasing modifier in hold mode deactivates."""

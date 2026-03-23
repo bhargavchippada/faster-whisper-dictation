@@ -107,6 +107,7 @@ class HotkeyListener:
             required_modifier_keys.update(keys)
 
         pressed_modifiers: set = set()
+        last_press_time = [0.0]  # mutable container for closure
 
         def _key_name(key) -> str:
             if hasattr(key, "char") and key.char:
@@ -124,23 +125,32 @@ class HotkeyListener:
             return True
 
         def on_press(key):
+            import time
+
             if key in required_modifier_keys:
                 pressed_modifiers.add(key)
 
             name = _key_name(key)
             if name == self._key and _is_modifier_held():
+                last_press_time[0] = time.monotonic()
                 self._handle_press()
 
         def on_release(key):
+            import time
+
             if key in required_modifier_keys:
                 pressed_modifiers.discard(key)
-                # In hold mode, if modifier released while active, deactivate
                 if self.mode == "hold" and self._active and not _is_modifier_held():
                     self._handle_release()
 
             name = _key_name(key)
             if name == self._key:
                 if self.mode == "hold" and self._active:
+                    # Debounce: ignore release if a press happened <50ms ago
+                    # (key auto-repeat generates rapid press/release pairs)
+                    elapsed = time.monotonic() - last_press_time[0]
+                    if elapsed < 0.05:
+                        return
                     self._handle_release()
 
         self._listener = keyboard.Listener(on_press=on_press, on_release=on_release)
@@ -242,28 +252,34 @@ class HotkeyListener:
                     log.debug("evdev read error", exc_info=True)
 
     def _handle_press(self) -> None:
+        callback = None
         with self._lock:
             if self.mode == "toggle":
                 if self._active:
                     self._active = False
                     log.debug("Toggle OFF")
-                    self.on_deactivate()
+                    callback = self.on_deactivate
                 else:
                     self._active = True
                     log.debug("Toggle ON")
-                    self.on_activate()
+                    callback = self.on_activate
             elif self.mode == "hold":
                 if not self._active:
                     self._active = True
                     log.debug("Hold ON")
-                    self.on_activate()
+                    callback = self.on_activate
+        if callback is not None:
+            callback()
 
     def _handle_release(self) -> None:
         """Release handler — only meaningful in hold mode."""
         if self.mode != "hold":
             return
+        callback = None
         with self._lock:
             if self._active:
                 self._active = False
                 log.debug("Hold OFF")
-                self.on_deactivate()
+                callback = self.on_deactivate
+        if callback is not None:
+            callback()

@@ -155,7 +155,8 @@ def cmd_start(args: argparse.Namespace) -> None:
     finally:
         os.close(fd)
 
-    daemon = DictationDaemon(config)
+    streaming = getattr(args, "streaming", False)
+    daemon = DictationDaemon(config, streaming=streaming)
 
     def _shutdown(sig: int, frame: object) -> None:
         daemon.stop()
@@ -389,6 +390,8 @@ def main() -> None:
     p_start.add_argument("--hotkey", help="hotkey binding (e.g. 'alt+v', 'ctrl+shift+d')")
     p_start.add_argument("--engine", choices=["server", "local"], help="transcription engine")
     p_start.add_argument("--server-url", help="whisper server URL")
+    p_start.add_argument("--streaming", action="store_true",
+                         help="stream text as you speak (lower quality, real-time)")
     p_start.add_argument("--config", type=Path, help="config file path")
     p_start.set_defaults(func=cmd_start)
 

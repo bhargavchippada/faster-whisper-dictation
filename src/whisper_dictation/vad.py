@@ -171,6 +171,11 @@ class SpeechDetector:
         self.chunk_size = sample_rate * _SILERO_CHUNK_MS // 1000  # 512 samples at 16kHz
         self._lock = threading.Lock()
 
+        # Pre-speech ring buffer: keeps last N chunks so the start of speech
+        # isn't clipped (VAD needs ~200ms to detect speech onset)
+        self._pre_speech_chunks = 8  # ~256ms of lookback at 32ms/chunk
+        self._ring_buffer: list[np.ndarray] = []
+
         self._is_speaking = False
         self._silence_count = 0
         self._speech_count = 0
@@ -190,6 +195,7 @@ class SpeechDetector:
             self._silence_count = 0
             self._speech_count = 0
             self._speech_frames.clear()
+            self._ring_buffer.clear()
             self._buffer = np.array([], dtype=np.float32)
             if _model is not None and hasattr(_model, "reset_states"):
                 _model.reset_states()
@@ -231,6 +237,9 @@ class SpeechDetector:
                     self._is_speaking = True
                     self._silence_count = 0
                     self._speech_count = 0
+                    # Prepend pre-speech audio so word onsets aren't clipped
+                    self._speech_frames.extend(self._ring_buffer)
+                    self._ring_buffer.clear()
                     log.debug("Speech started (prob=%.2f)", prob)
 
                 self._speech_count += 1
@@ -272,6 +281,12 @@ class SpeechDetector:
 
                     if completed_utterance is not None:
                         break  # return immediately to avoid overwriting
+
+            else:
+                # Not speaking — maintain ring buffer for pre-speech lookback
+                self._ring_buffer.append(chunk)
+                if len(self._ring_buffer) > self._pre_speech_chunks:
+                    self._ring_buffer.pop(0)
 
         return (completed_utterance is not None, completed_utterance)
 

@@ -98,10 +98,10 @@ class TestTypeLinuxX11:
         second_call = mock_run.call_args_list[1]
         assert second_call[1]["input"] == b"new text"
 
-        # 3. Paste (ctrl+v)
+        # 3. Paste (ctrl+shift+v)
         third_call = mock_run.call_args_list[2]
         assert "xdotool" in third_call[0][0]
-        assert "ctrl+v" in third_call[0][0]
+        assert "ctrl+shift+v" in third_call[0][0]
 
         # 4. Restore clipboard
         fourth_call = mock_run.call_args_list[3]
@@ -130,16 +130,15 @@ class TestTypeLinuxWayland:
         # 1. Save clipboard (wl-paste)
         assert "wl-paste" in mock_run.call_args_list[0][0][0]
 
-        # 2. Set clipboard (wl-copy)
-        assert "wl-copy" in mock_run.call_args_list[1][0][0]
-        assert "wayland text" in mock_run.call_args_list[1][0][0]
+        # 2. Set clipboard (wl-copy with -- to prevent argument injection)
+        wl_copy_args = mock_run.call_args_list[1][0][0]
+        assert wl_copy_args == ["wl-copy", "--", "wayland text"]
 
         # 3. Paste (ydotool Ctrl+V keycodes)
         assert "ydotool" in mock_run.call_args_list[2][0][0]
 
-        # 4. Restore (wl-copy)
-        assert "wl-copy" in mock_run.call_args_list[3][0][0]
-        assert "old_wayland" in mock_run.call_args_list[3][0][0]
+        # 4. Restore (wl-copy with -- for safety)
+        assert mock_run.call_args_list[3][0][0] == ["wl-copy", "--", "old_wayland"]
 
         mock_sleep.assert_called_once()
 

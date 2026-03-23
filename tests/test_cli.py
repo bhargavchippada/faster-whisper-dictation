@@ -181,18 +181,19 @@ class TestPidManagement:
         state_file = tmp_path / "state.json"
         pid_file.write_text("123")
 
-        # Set the module-level _pid_lock_fd
         cli_mod._pid_lock_fd = 42
+        try:
+            with (
+                patch("whisper_dictation.cli.PID_FILE", pid_file),
+                patch("whisper_dictation.cli.STATE_FILE", state_file),
+                patch("os.close") as mock_close,
+            ):
+                _cleanup_pid()
 
-        with (
-            patch("whisper_dictation.cli.PID_FILE", pid_file),
-            patch("whisper_dictation.cli.STATE_FILE", state_file),
-            patch("os.close") as mock_close,
-        ):
-            _cleanup_pid()
-
-        mock_close.assert_called_once_with(42)
-        assert cli_mod._pid_lock_fd is None
+            mock_close.assert_called_once_with(42)
+            assert cli_mod._pid_lock_fd is None
+        finally:
+            cli_mod._pid_lock_fd = None
 
     def test_cleanup_pid_close_oserror_suppressed(self, tmp_path):
         """Test _cleanup_pid suppresses OSError when closing lock fd."""
@@ -203,16 +204,18 @@ class TestPidManagement:
         pid_file.write_text("123")
 
         cli_mod._pid_lock_fd = 42
+        try:
+            with (
+                patch("whisper_dictation.cli.PID_FILE", pid_file),
+                patch("whisper_dictation.cli.STATE_FILE", state_file),
+                patch("os.close", side_effect=OSError("bad fd")),
+            ):
+                # Should not raise
+                _cleanup_pid()
 
-        with (
-            patch("whisper_dictation.cli.PID_FILE", pid_file),
-            patch("whisper_dictation.cli.STATE_FILE", state_file),
-            patch("os.close", side_effect=OSError("bad fd")),
-        ):
-            # Should not raise
-            _cleanup_pid()
-
-        assert cli_mod._pid_lock_fd is None
+            assert cli_mod._pid_lock_fd is None
+        finally:
+            cli_mod._pid_lock_fd = None
 
 
 # ---------------------------------------------------------------------------

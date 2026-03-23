@@ -83,7 +83,8 @@ class TestNotifyMacosEscape:
         mock_run.assert_called_once()
         script = mock_run.call_args[0][0][2]
         assert '\\"hello\\"' in script
-        assert "\\\\\\\\" in script or "path" in script
+        # Backslashes should be doubled for AppleScript
+        assert "path\\\\to\\\\file" in script
 
     @patch("whisper_dictation.notifier.sys")
     @patch("whisper_dictation.notifier.subprocess.run")
