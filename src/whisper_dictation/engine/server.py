@@ -29,8 +29,15 @@ class ServerEngine(TranscriptionEngine):
                 self._url,
                 files={"file": ("audio.wav", wav_data, "audio/wav")},
                 data={
-                    "model": self.config.model,
-                    "language": self.config.language,
+                    k: v
+                    for k, v in {
+                        "model": self.config.model,
+                        "language": self.config.language,
+                        "prompt": self.config.prompt or None,
+                        "temperature": str(self.config.temperature),
+                        "hotwords": self.config.hotwords or None,
+                    }.items()
+                    if v is not None
                 },
                 timeout=self.config.timeout,
             )

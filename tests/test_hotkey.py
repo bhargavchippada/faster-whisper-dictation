@@ -751,3 +751,60 @@ class TestEvdevLoop:
         with patch.dict("sys.modules", {"evdev": mock_evdev, "evdev.ecodes": mock_ecodes}):
             listener._evdev_loop()
             # Should return early because no suitable devices
+
+    def test_evdev_loop_closes_devices_on_exit(self):
+        """Test evdev devices are closed when the loop exits."""
+        listener = HotkeyListener("alt+v", "toggle", MagicMock(), MagicMock())
+
+        mock_evdev, mock_ecodes = self._make_mock_evdev()
+
+        mock_dev = MagicMock()
+        caps = {mock_ecodes.EV_KEY: [mock_ecodes.KEY_V, mock_ecodes.KEY_LEFTALT]}
+        mock_dev.capabilities.return_value = caps
+        mock_dev.name = "Test KB"
+        mock_dev.path = "/dev/input/event0"
+
+        mock_evdev.list_devices.return_value = ["/dev/input/event0"]
+        mock_evdev.InputDevice.return_value = mock_dev
+
+        # Stop immediately
+        listener._stop_event.set()
+
+        with (
+            patch.dict(
+                "sys.modules",
+                {"evdev": mock_evdev, "evdev.ecodes": mock_ecodes, "select": MagicMock()},
+            ),
+            patch("select.select", return_value=([], [], [])),
+        ):
+            listener._evdev_loop()
+
+        mock_dev.close.assert_called_once()
+
+    def test_evdev_loop_close_error_suppressed(self):
+        """Test evdev device close errors are silently suppressed."""
+        listener = HotkeyListener("alt+v", "toggle", MagicMock(), MagicMock())
+
+        mock_evdev, mock_ecodes = self._make_mock_evdev()
+
+        mock_dev = MagicMock()
+        caps = {mock_ecodes.EV_KEY: [mock_ecodes.KEY_V, mock_ecodes.KEY_LEFTALT]}
+        mock_dev.capabilities.return_value = caps
+        mock_dev.name = "Test KB"
+        mock_dev.path = "/dev/input/event0"
+        mock_dev.close.side_effect = OSError("device gone")
+
+        mock_evdev.list_devices.return_value = ["/dev/input/event0"]
+        mock_evdev.InputDevice.return_value = mock_dev
+
+        listener._stop_event.set()
+
+        with (
+            patch.dict(
+                "sys.modules",
+                {"evdev": mock_evdev, "evdev.ecodes": mock_ecodes, "select": MagicMock()},
+            ),
+            patch("select.select", return_value=([], [], [])),
+        ):
+            # Should not raise
+            listener._evdev_loop()

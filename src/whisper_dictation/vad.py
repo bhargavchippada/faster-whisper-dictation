@@ -6,6 +6,7 @@ import hashlib
 import logging
 import os
 import threading
+from collections import deque
 from urllib.parse import urlparse
 
 import numpy as np
@@ -89,7 +90,9 @@ def _load_onnx_model() -> None:
 
     from platformdirs import user_cache_dir
 
-    cache = Path(user_cache_dir("whisper-dictation")) / "silero_vad.onnx"
+    from .config import APP_NAME
+
+    cache = Path(user_cache_dir(APP_NAME)) / "silero_vad.onnx"
     if not cache.exists():
         cache.parent.mkdir(parents=True, exist_ok=True)
         tmp = cache.with_suffix(".tmp")
@@ -174,7 +177,7 @@ class SpeechDetector:
         # Pre-speech ring buffer: keeps last N chunks so the start of speech
         # isn't clipped (VAD needs ~200ms to detect speech onset)
         self._pre_speech_chunks = 8  # ~256ms of lookback at 32ms/chunk
-        self._ring_buffer: list[np.ndarray] = []
+        self._ring_buffer: deque[np.ndarray] = deque(maxlen=self._pre_speech_chunks)
 
         self._is_speaking = False
         self._silence_count = 0
@@ -285,8 +288,6 @@ class SpeechDetector:
             else:
                 # Not speaking — maintain ring buffer for pre-speech lookback
                 self._ring_buffer.append(chunk)
-                if len(self._ring_buffer) > self._pre_speech_chunks:
-                    self._ring_buffer.pop(0)
 
         return (completed_utterance is not None, completed_utterance)
 

@@ -155,12 +155,11 @@ def cmd_start(args: argparse.Namespace) -> None:
     finally:
         os.close(fd)
 
-    streaming = getattr(args, "streaming", False)
+    streaming = args.streaming
     daemon = DictationDaemon(config, streaming=streaming)
 
     def _shutdown(sig: int, frame: object) -> None:
         daemon.stop()
-        _cleanup_pid()
         sys.exit(0)
 
     signal.signal(signal.SIGTERM, _shutdown)
@@ -221,6 +220,9 @@ url = "http://localhost:10300"        # Whisper server URL
 model = "Systran/faster-whisper-large-v3"
 language = "en"                       # Language code (e.g. "en", "es", "de")
 timeout = 10                          # Request timeout in seconds
+# prompt = ""                          # Bias transcription (e.g. domain terms)
+# temperature = 0.0                    # 0.0 = accurate, higher = creative
+# hotwords = ""                        # Comma-separated words to boost
 
 [hotkey]
 binding = "alt+v"                     # Hotkey combo (e.g. "alt+v", "ctrl+shift+d")
@@ -269,6 +271,11 @@ def cmd_config(args: argparse.Namespace) -> None:
     print(f"  model        = {config.server.model}")
     print(f"  language     = {config.server.language}")
     print(f"  timeout      = {config.server.timeout}s")
+    print(f"  temperature  = {config.server.temperature}")
+    if config.server.prompt:
+        print(f"  prompt       = {config.server.prompt}")
+    if config.server.hotwords:
+        print(f"  hotwords     = {config.server.hotwords}")
     print()
     print("[hotkey]")
     print(f"  binding      = {config.hotkey.binding}")

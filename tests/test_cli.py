@@ -965,3 +965,24 @@ class TestCmdConfig:
 
         captured = capsys.readouterr()
         assert "exists" in captured.out
+
+    def test_show_displays_prompt_and_hotwords(self, tmp_path, capsys):
+        config_file = tmp_path / "config.toml"
+
+        args = MagicMock()
+        args.generate = False
+        args.force = False
+        args.path = False
+
+        from whisper_dictation.config import Config, ServerConfig
+
+        cfg = Config(server=ServerConfig(prompt="dictation mode", hotwords="Claude,Whisper"))
+        with (
+            patch("whisper_dictation.cli.CONFIG_FILE", config_file),
+            patch("whisper_dictation.cli.load_config", return_value=cfg),
+        ):
+            cmd_config(args)
+
+        captured = capsys.readouterr()
+        assert "dictation mode" in captured.out
+        assert "Claude,Whisper" in captured.out

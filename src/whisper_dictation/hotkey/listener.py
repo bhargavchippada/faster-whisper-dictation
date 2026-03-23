@@ -213,43 +213,50 @@ class HotkeyListener:
 
         import select
 
-        while not self._stop_event.is_set():
-            r, _, _ = select.select(devices, [], [], 1.0)
-            for dev in r:
+        try:
+            while not self._stop_event.is_set():
+                r, _, _ = select.select(devices, [], [], 1.0)
+                for dev in r:
+                    try:
+                        for event in dev.read():
+                            if event.type != ecodes.EV_KEY:
+                                continue
+
+                            if event.value == 1:  # key down
+                                pressed.add(event.code)
+                            elif event.value == 0:  # key up
+                                pressed.discard(event.code)
+
+                            # Check if our hotkey combo is active
+                            mods_held = all(
+                                any(c in pressed for c in key_map.get(mod, set()))
+                                for mod in self._modifiers
+                            )
+
+                            if event.code == target_key:
+                                if event.value == 1 and mods_held:
+                                    self._handle_press()
+                                elif event.value == 0 and self.mode == "hold" and self._active:
+                                    self._handle_release()
+
+                            # Hold mode: modifier release deactivates
+                            if (
+                                self.mode == "hold"
+                                and self._active
+                                and event.value == 0
+                                and event.code in required_codes
+                            ):
+                                if not mods_held:
+                                    self._handle_release()
+
+                    except Exception:
+                        log.debug("evdev read error", exc_info=True)
+        finally:
+            for dev in devices:
                 try:
-                    for event in dev.read():
-                        if event.type != ecodes.EV_KEY:
-                            continue
-
-                        if event.value == 1:  # key down
-                            pressed.add(event.code)
-                        elif event.value == 0:  # key up
-                            pressed.discard(event.code)
-
-                        # Check if our hotkey combo is active
-                        mods_held = all(
-                            any(c in pressed for c in key_map.get(mod, set()))
-                            for mod in self._modifiers
-                        )
-
-                        if event.code == target_key:
-                            if event.value == 1 and mods_held:
-                                self._handle_press()
-                            elif event.value == 0 and self.mode == "hold" and self._active:
-                                self._handle_release()
-
-                        # Hold mode: modifier release deactivates
-                        if (
-                            self.mode == "hold"
-                            and self._active
-                            and event.value == 0
-                            and event.code in required_codes
-                        ):
-                            if not mods_held:
-                                self._handle_release()
-
+                    dev.close()
                 except Exception:
-                    log.debug("evdev read error", exc_info=True)
+                    pass
 
     def _handle_press(self) -> None:
         callback = None

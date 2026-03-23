@@ -29,6 +29,9 @@ class ServerConfig:
     model: str = "Systran/faster-whisper-large-v3"
     language: str = "en"
     timeout: int = 10
+    prompt: str = ""  # initial prompt to bias transcription (e.g. domain vocabulary)
+    temperature: float = 0.0  # 0.0 = most accurate, higher = more creative
+    hotwords: str = ""  # comma-separated words to boost recognition
 
 
 @dataclass(frozen=True)
@@ -75,6 +78,9 @@ def _apply_env_overrides(config: Config) -> Config:
         "WHISPER_MODEL": ("server", "model"),
         "WHISPER_LANG": ("server", "language"),
         "WHISPER_TIMEOUT": ("server", "timeout"),
+        "WHISPER_PROMPT": ("server", "prompt"),
+        "WHISPER_TEMPERATURE": ("server", "temperature"),
+        "WHISPER_HOTWORDS": ("server", "hotwords"),
         "DICTATION_HOTKEY": ("hotkey", "binding"),
         "DICTATION_MODE": ("hotkey", "mode"),
         "DICTATION_ENGINE": ("engine", "type"),
@@ -159,7 +165,6 @@ def load_config(config_path: Path | None = None) -> Config:
         config = Config()
 
     config = _apply_env_overrides(config)
-    validate(config)
     return config
 
 
