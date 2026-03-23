@@ -348,7 +348,7 @@ class TestCmdStatus:
                     "mode": "toggle",
                     "hotkey": "alt+v",
                     "engine": "server",
-                    "server_url": "http://localhost:10300",
+                    "server_url": "http://localhost:9090",
                 }
             )
         )

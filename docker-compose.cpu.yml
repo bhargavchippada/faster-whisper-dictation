@@ -1,33 +1,7 @@
 services:
-  faster-whisper:
-    image: ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cpu
-    container_name: faster-whisper
+  whisperlive:
+    image: ghcr.io/collabora/whisperlive-cpu:latest
+    container_name: whisperlive
     restart: unless-stopped
     ports:
-      - "127.0.0.1:10300:10300"
-    environment:
-      # Whisper / STT
-      - WHISPER__INFERENCE_DEVICE=cpu
-      - WHISPER__COMPUTE_TYPE=int8
-      - WHISPER__NUM_WORKERS=1
-      # Server
-      - UVICORN_HOST=0.0.0.0
-      - UVICORN_PORT=10300
-      # Realtime API (WebSocket) — server calls itself for transcription
-      - LOOPBACK_HOST_URL=http://localhost:10300
-      # Model lifecycle — keep loaded permanently
-      - STT_MODEL_TTL=-1
-      - VAD_MODEL_TTL=-1
-      # Preload model at startup
-      - PRELOAD_MODELS=["Systran/faster-whisper-large-v3"]
-      # Logging
-      - LOG_LEVEL=info
-      # Disable Gradio UI (API-only)
-      - ENABLE_UI=false
-    volumes:
-      - faster-whisper-models:/home/ubuntu/.cache/huggingface
-
-volumes:
-  faster-whisper-models:
-    name: faster-whisper-dictation_faster-whisper-models
-    external: true
+      - "127.0.0.1:9090:9090"

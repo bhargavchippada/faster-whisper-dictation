@@ -1,9 +1,9 @@
-"""Tests for whisper_dictation.engine.websocket — WebSocketEngine."""
+"""Tests for whisper_dictation.engine.websocket — WhisperLive WebSocketEngine."""
 
 from __future__ import annotations
 
-import base64
 import json
+import threading
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -11,12 +11,9 @@ import pytest
 
 from whisper_dictation.engine.websocket import (
     WebSocketEngine,
-    _build_audio_append,
-    _build_audio_commit,
-    _build_session_update,
-    _encode_audio_b64,
+    _audio_to_float32_bytes,
+    _build_config_message,
     _http_to_ws_url,
-    _resample_16k_to_24k,
 )
 
 # ---------------------------------------------------------------------------
@@ -26,7 +23,7 @@ from whisper_dictation.engine.websocket import (
 
 class TestHttpToWsUrl:
     def test_http_to_ws(self):
-        assert _http_to_ws_url("http://localhost:10300") == "ws://localhost:10300"
+        assert _http_to_ws_url("http://localhost:9090") == "ws://localhost:9090"
 
     def test_https_to_wss(self):
         assert _http_to_ws_url("https://api.example.com") == "wss://api.example.com"
@@ -39,38 +36,24 @@ class TestHttpToWsUrl:
 
 
 # ---------------------------------------------------------------------------
-# Protocol message builders
+# Config message
 # ---------------------------------------------------------------------------
 
 
-class TestBuildSessionUpdate:
+class TestBuildConfigMessage:
     def test_default_values(self):
-        msg = _build_session_update()
-        assert msg["type"] == "session.update"
-        td = msg["session"]["turn_detection"]
-        assert td["type"] == "server_vad"
-        assert td["silence_duration_ms"] == 500
-        assert td["threshold"] == 0.5
-        assert td["create_response"] is False
+        msg = _build_config_message(uid="test-123", language="en", model="small")
+        assert msg["uid"] == "test-123"
+        assert msg["language"] == "en"
+        assert msg["task"] == "transcribe"
+        assert msg["model"] == "small"
+        assert msg["use_vad"] is True
 
-    def test_custom_values(self):
-        msg = _build_session_update(silence_duration_ms=300, vad_threshold=0.8)
-        td = msg["session"]["turn_detection"]
-        assert td["silence_duration_ms"] == 300
-        assert td["threshold"] == 0.8
-
-
-class TestBuildAudioAppend:
-    def test_structure(self):
-        msg = _build_audio_append("AQID")
-        assert msg["type"] == "input_audio_buffer.append"
-        assert msg["audio"] == "AQID"
-
-
-class TestBuildAudioCommit:
-    def test_structure(self):
-        msg = _build_audio_commit()
-        assert msg["type"] == "input_audio_buffer.commit"
+    def test_vad_disabled(self):
+        msg = _build_config_message(uid="x", language="de", model="large-v3", use_vad=False)
+        assert msg["use_vad"] is False
+        assert msg["language"] == "de"
+        assert msg["model"] == "large-v3"
 
 
 # ---------------------------------------------------------------------------
@@ -78,97 +61,40 @@ class TestBuildAudioCommit:
 # ---------------------------------------------------------------------------
 
 
-class TestResample16kTo24k:
-    def test_output_length(self):
-        audio = np.zeros(512, dtype=np.float32)
-        resampled = _resample_16k_to_24k(audio)
-        assert len(resampled) == 768  # 512 * 3 / 2
-
-    def test_empty_array(self):
-        audio = np.array([], dtype=np.float32)
-        resampled = _resample_16k_to_24k(audio)
-        assert len(resampled) == 0
-
-    def test_preserves_values(self):
-        audio = np.ones(100, dtype=np.float32) * 0.5
-        resampled = _resample_16k_to_24k(audio)
-        np.testing.assert_allclose(resampled, 0.5, atol=0.01)
-
-
-class TestEncodeAudioB64:
-    def test_float32_encoding_with_resample(self):
-        audio = np.ones(100, dtype=np.float32) * 0.5
-        b64 = _encode_audio_b64(audio, resample_24k=True)
-        decoded = base64.b64decode(b64)
-        pcm = np.frombuffer(decoded, dtype=np.int16)
-        # Resampled: 100 * 3/2 = 150 samples
-        assert len(pcm) == 150
-        assert all(abs(s - 16384) < 100 for s in pcm)
-
-    def test_float32_encoding_no_resample(self):
+class TestAudioToFloat32Bytes:
+    def test_float32_passthrough(self):
         audio = np.array([0.5, -0.5], dtype=np.float32)
-        b64 = _encode_audio_b64(audio, resample_24k=False)
-        decoded = base64.b64decode(b64)
-        pcm = np.frombuffer(decoded, dtype=np.int16)
-        assert pcm[0] == 16384
-        assert pcm[1] == -16384
+        data = _audio_to_float32_bytes(audio)
+        result = np.frombuffer(data, dtype=np.float32)
+        np.testing.assert_array_almost_equal(result, [0.5, -0.5])
 
-    def test_int16_no_resample(self):
-        audio = np.array([100, -100], dtype=np.int16)
-        b64 = _encode_audio_b64(audio, resample_24k=False)
-        decoded = base64.b64decode(b64)
-        pcm = np.frombuffer(decoded, dtype=np.int16)
-        assert pcm[0] == 100
-        assert pcm[1] == -100
+    def test_float64_converts(self):
+        audio = np.array([0.5, -0.5], dtype=np.float64)
+        data = _audio_to_float32_bytes(audio)
+        result = np.frombuffer(data, dtype=np.float32)
+        np.testing.assert_array_almost_equal(result, [0.5, -0.5])
 
-    def test_int16_with_resample(self):
-        audio = np.ones(100, dtype=np.int16) * 100
-        b64 = _encode_audio_b64(audio, resample_24k=True)
-        decoded = base64.b64decode(b64)
-        pcm = np.frombuffer(decoded, dtype=np.int16)
-        assert len(pcm) == 150
-
-    def test_float64_encoding(self):
-        audio = np.ones(100, dtype=np.float64) * 0.5
-        b64 = _encode_audio_b64(audio, resample_24k=True)
-        decoded = base64.b64decode(b64)
-        pcm = np.frombuffer(decoded, dtype=np.int16)
-        assert len(pcm) == 150
-
-    def test_clipping(self):
-        audio = np.array([1.5, -1.5], dtype=np.float32)
-        b64 = _encode_audio_b64(audio, resample_24k=False)
-        decoded = base64.b64decode(b64)
-        pcm = np.frombuffer(decoded, dtype=np.int16)
-        assert pcm[0] == 32767
-        assert pcm[1] == -32768
+    def test_int16_converts(self):
+        audio = np.array([16384, -16384], dtype=np.int16)
+        data = _audio_to_float32_bytes(audio)
+        result = np.frombuffer(data, dtype=np.float32)
+        np.testing.assert_array_almost_equal(result, [0.5, -0.5], decimal=3)
 
 
 # ---------------------------------------------------------------------------
-# WebSocketEngine
+# WebSocketEngine init
 # ---------------------------------------------------------------------------
 
 
 class TestWebSocketEngineInit:
     def test_ws_url_construction(self):
         engine = WebSocketEngine(
-            server_url="http://localhost:10300",
+            server_url="http://localhost:9090",
             model="tiny",
             language="en",
             on_text=MagicMock(),
         )
-        assert engine.ws_url == "ws://localhost:10300/v1/realtime?intent=transcription&model=tiny&language=en"
-
-    def test_ws_url_https(self):
-        engine = WebSocketEngine(
-            server_url="https://api.example.com",
-            model="large-v3",
-            language="",
-            on_text=MagicMock(),
-        )
-        url = engine.ws_url
-        assert url.startswith("wss://")
-        assert "language=" not in url
+        assert engine.ws_url == "ws://localhost:9090"
 
     def test_ws_url_trailing_slash_stripped(self):
         engine = WebSocketEngine(
@@ -177,28 +103,33 @@ class TestWebSocketEngineInit:
             language="en",
             on_text=MagicMock(),
         )
-        assert "host:8080/v1/" in engine.ws_url
+        assert engine.ws_url == "ws://host:8080"
+
+
+# ---------------------------------------------------------------------------
+# Connect
+# ---------------------------------------------------------------------------
 
 
 class TestWebSocketEngineConnect:
-    def test_connect_sends_session_update(self):
+    def test_connect_sends_config(self):
         mock_ws = MagicMock()
-        on_text = MagicMock()
         engine = WebSocketEngine(
-            server_url="http://localhost:10300",
+            server_url="http://localhost:9090",
             model="tiny",
             language="en",
-            on_text=on_text,
+            on_text=MagicMock(),
         )
 
         with patch("whisper_dictation.engine.websocket.ws_sync") as mock_ws_mod:
             mock_ws_mod.connect.return_value = mock_ws
             engine.connect()
 
-        # Verify session.update was sent
         sent = mock_ws.send.call_args[0][0]
         msg = json.loads(sent)
-        assert msg["type"] == "session.update"
+        assert msg["task"] == "transcribe"
+        assert msg["model"] == "tiny"
+        assert msg["language"] == "en"
         assert engine._connected.is_set()
 
         engine.close()
@@ -220,9 +151,8 @@ class TestWebSocketEngineConnect:
         assert not engine._connected.is_set()
 
     def test_connect_retries_on_failure(self):
-        """Connect retries up to reconnect_attempts before raising."""
         engine = WebSocketEngine(
-            server_url="http://localhost:10300",
+            server_url="http://localhost:9090",
             model="tiny",
             language="en",
             reconnect_attempts=2,
@@ -235,14 +165,12 @@ class TestWebSocketEngineConnect:
             with pytest.raises(ConnectionRefusedError):
                 engine.connect()
 
-        # 1 initial + 2 retries = 3 total attempts
         assert mock_ws_mod.connect.call_count == 3
 
     def test_connect_succeeds_on_retry(self):
-        """Connect succeeds after initial failure."""
         mock_ws = MagicMock()
         engine = WebSocketEngine(
-            server_url="http://localhost:10300",
+            server_url="http://localhost:9090",
             model="tiny",
             language="en",
             reconnect_attempts=2,
@@ -255,14 +183,18 @@ class TestWebSocketEngineConnect:
             engine.connect()
 
         assert engine._connected.is_set()
-        assert mock_ws_mod.connect.call_count == 2
         engine.close()
 
 
+# ---------------------------------------------------------------------------
+# Send audio
+# ---------------------------------------------------------------------------
+
+
 class TestWebSocketEngineSendAudio:
-    def test_send_audio_queues_message(self):
+    def test_send_audio_queues_bytes(self):
         engine = WebSocketEngine(
-            server_url="http://localhost:10300",
+            server_url="http://localhost:9090",
             model="tiny",
             language="en",
             on_text=MagicMock(),
@@ -272,45 +204,45 @@ class TestWebSocketEngineSendAudio:
         audio = np.zeros(512, dtype=np.float32)
         engine.send_audio(audio)
 
-        msg = engine._send_queue.get_nowait()
-        parsed = json.loads(msg)
-        assert parsed["type"] == "input_audio_buffer.append"
-        assert "audio" in parsed
+        data = engine._send_queue.get_nowait()
+        assert isinstance(data, bytes)
+        assert len(data) == 512 * 4  # float32 = 4 bytes per sample
 
     def test_send_audio_drops_when_queue_full(self):
-        """Audio is silently dropped when queue is full."""
         engine = WebSocketEngine(
-            server_url="http://localhost:10300",
+            server_url="http://localhost:9090",
             model="tiny",
             language="en",
             on_text=MagicMock(),
         )
         engine._connected.set()
 
-        # Fill the queue
         for _ in range(engine._send_queue.maxsize):
             engine.send_audio(np.zeros(16, dtype=np.float32))
 
-        # This should not raise — just drops
         engine.send_audio(np.zeros(16, dtype=np.float32))
         assert engine._send_queue.full()
 
     def test_send_audio_when_disconnected_is_noop(self):
         engine = WebSocketEngine(
-            server_url="http://localhost:10300",
+            server_url="http://localhost:9090",
             model="tiny",
             language="en",
             on_text=MagicMock(),
         )
-        # Not connected
         engine.send_audio(np.zeros(512, dtype=np.float32))
         assert engine._send_queue.empty()
 
 
+# ---------------------------------------------------------------------------
+# Flush
+# ---------------------------------------------------------------------------
+
+
 class TestWebSocketEngineFlush:
-    def test_flush_queues_commit(self):
+    def test_flush_queues_end_signal(self):
         engine = WebSocketEngine(
-            server_url="http://localhost:10300",
+            server_url="http://localhost:9090",
             model="tiny",
             language="en",
             on_text=MagicMock(),
@@ -319,26 +251,42 @@ class TestWebSocketEngineFlush:
 
         engine.flush()
 
-        msg = engine._send_queue.get_nowait()
-        parsed = json.loads(msg)
-        assert parsed["type"] == "input_audio_buffer.commit"
+        data = engine._send_queue.get_nowait()
+        assert data == b"__END__"
 
     def test_flush_when_disconnected_is_noop(self):
         engine = WebSocketEngine(
-            server_url="http://localhost:10300",
+            server_url="http://localhost:9090",
             model="tiny",
             language="en",
             on_text=MagicMock(),
         )
         engine.flush()
         assert engine._send_queue.empty()
+
+    def test_flush_when_queue_full(self):
+        engine = WebSocketEngine(
+            server_url="http://localhost:9090",
+            model="tiny",
+            language="en",
+            on_text=MagicMock(),
+        )
+        engine._connected.set()
+        for _ in range(engine._send_queue.maxsize):
+            engine._send_queue.put_nowait(b"filler")
+        engine.flush()  # should not raise
+
+
+# ---------------------------------------------------------------------------
+# Close
+# ---------------------------------------------------------------------------
 
 
 class TestWebSocketEngineClose:
     def test_close_cleans_up(self):
         mock_ws = MagicMock()
         engine = WebSocketEngine(
-            server_url="http://localhost:10300",
+            server_url="http://localhost:9090",
             model="tiny",
             language="en",
             on_text=MagicMock(),
@@ -356,38 +304,99 @@ class TestWebSocketEngineClose:
 
     def test_close_without_connect_is_safe(self):
         engine = WebSocketEngine(
-            server_url="http://localhost:10300",
+            server_url="http://localhost:9090",
             model="tiny",
             language="en",
             on_text=MagicMock(),
         )
-        engine.close()  # should not raise
+        engine.close()
 
     def test_close_handles_ws_error(self):
         mock_ws = MagicMock()
         mock_ws.close.side_effect = RuntimeError("already closed")
         engine = WebSocketEngine(
-            server_url="http://localhost:10300",
+            server_url="http://localhost:9090",
             model="tiny",
             language="en",
             on_text=MagicMock(),
         )
         engine._ws = mock_ws
         engine._connected.set()
-
-        engine.close()  # should not raise
+        engine.close()
         assert engine._ws is None
+
+    def test_close_warns_on_stuck_threads(self):
+        engine = WebSocketEngine(
+            server_url="http://localhost:9090",
+            model="tiny",
+            language="en",
+            on_text=MagicMock(),
+        )
+        mock_sender = MagicMock(spec=threading.Thread)
+        mock_sender.is_alive.return_value = True
+        mock_receiver = MagicMock(spec=threading.Thread)
+        mock_receiver.is_alive.return_value = True
+        engine._sender_thread = mock_sender
+        engine._receiver_thread = mock_receiver
+        engine.close()
+        mock_sender.join.assert_called_once()
+        mock_receiver.join.assert_called_once()
+
+    def test_close_with_full_queue(self):
+        engine = WebSocketEngine(
+            server_url="http://localhost:9090",
+            model="tiny",
+            language="en",
+            on_text=MagicMock(),
+        )
+        engine._connected.set()
+        for _ in range(engine._send_queue.maxsize):
+            engine._send_queue.put_nowait(b"filler")
+        engine.close()
+
+    def test_close_drains_queue(self):
+        engine = WebSocketEngine(
+            server_url="http://localhost:9090",
+            model="tiny",
+            language="en",
+            on_text=MagicMock(),
+        )
+        engine._send_queue.put(b"item1")
+        engine._send_queue.put(b"item2")
+        engine.close()
+        assert engine._send_queue.empty()
+
+    def test_close_drain_handles_concurrent_empty(self):
+        import queue as queue_mod
+
+        engine = WebSocketEngine(
+            server_url="http://localhost:9090",
+            model="tiny",
+            language="en",
+            on_text=MagicMock(),
+        )
+        mock_queue = MagicMock(spec=queue_mod.Queue)
+        empty_calls = [False, True]
+        mock_queue.empty.side_effect = lambda: empty_calls.pop(0) if empty_calls else True
+        mock_queue.get_nowait.side_effect = queue_mod.Empty
+        mock_queue.put_nowait = MagicMock()
+        engine._send_queue = mock_queue
+        engine.close()
+
+
+# ---------------------------------------------------------------------------
+# is_available
+# ---------------------------------------------------------------------------
 
 
 class TestWebSocketEngineIsAvailable:
     def test_available(self):
         engine = WebSocketEngine(
-            server_url="http://localhost:10300",
+            server_url="http://localhost:9090",
             model="tiny",
             language="en",
             on_text=MagicMock(),
         )
-
         with patch("whisper_dictation.engine.websocket.ws_sync") as mock_ws_mod:
             mock_ws_mod.connect.return_value = MagicMock()
             assert engine.is_available() is True
@@ -399,120 +408,256 @@ class TestWebSocketEngineIsAvailable:
             language="en",
             on_text=MagicMock(),
         )
-
         with patch("whisper_dictation.engine.websocket.ws_sync") as mock_ws_mod:
             mock_ws_mod.connect.side_effect = ConnectionRefusedError
             assert engine.is_available() is False
+
+
+# ---------------------------------------------------------------------------
+# wait_for_completion
+# ---------------------------------------------------------------------------
+
+
+class TestWebSocketEngineWaitForCompletion:
+    def test_returns_true_when_completed(self):
+        engine = WebSocketEngine(
+            server_url="http://localhost:9090",
+            model="tiny",
+            language="en",
+            on_text=MagicMock(),
+        )
+        engine._flush_done.set()
+        assert engine.wait_for_completion(timeout=0.1) is True
+
+    def test_returns_false_on_timeout(self):
+        engine = WebSocketEngine(
+            server_url="http://localhost:9090",
+            model="tiny",
+            language="en",
+            on_text=MagicMock(),
+        )
+        assert engine.wait_for_completion(timeout=0.01) is False
+
+
+# ---------------------------------------------------------------------------
+# _handle_message — WhisperLive protocol
+# ---------------------------------------------------------------------------
 
 
 class TestWebSocketEngineHandleMessage:
     def _make_engine(self):
         on_text = MagicMock()
         engine = WebSocketEngine(
-            server_url="http://localhost:10300",
+            server_url="http://localhost:9090",
             model="tiny",
             language="en",
             on_text=on_text,
         )
         return engine, on_text
 
-    def test_transcription_completed_calls_on_text(self):
+    def test_server_ready(self):
         engine, on_text = self._make_engine()
-        engine._handle_message(
-            "conversation.item.input_audio_transcription.completed",
-            {"transcript": "hello world"},
+        engine._handle_message({"message": "SERVER_READY", "backend": "faster_whisper"})
+        on_text.assert_not_called()
+
+    def test_wait_message(self):
+        engine, on_text = self._make_engine()
+        engine._handle_message({"status": "WAIT", "message": 5})
+        on_text.assert_not_called()
+
+    def test_language_detection(self):
+        engine, on_text = self._make_engine()
+        engine._handle_message({"language": "en", "language_prob": 0.95})
+        on_text.assert_not_called()
+
+    def test_unknown_message(self):
+        engine, on_text = self._make_engine()
+        engine._handle_message({"unknown": "field"})
+        on_text.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# _process_segments
+# ---------------------------------------------------------------------------
+
+
+class TestProcessSegments:
+    def _make_engine(self):
+        on_text = MagicMock()
+        engine = WebSocketEngine(
+            server_url="http://localhost:9090",
+            model="tiny",
+            language="en",
+            on_text=on_text,
         )
+        return engine, on_text
+
+    def test_completed_segment_emits_text(self):
+        engine, on_text = self._make_engine()
+        segments = [{"text": "hello world", "completed": True}]
+        engine._process_segments(segments)
         on_text.assert_called_once_with("hello world")
 
-    def test_transcription_completed_empty_ignored(self):
+    def test_partial_segment_emits_text(self):
         engine, on_text = self._make_engine()
-        engine._handle_message(
-            "conversation.item.input_audio_transcription.completed",
-            {"transcript": "  "},
-        )
+        segments = [{"text": "hello", "completed": False}]
+        engine._process_segments(segments)
+        on_text.assert_called_once_with("hello")
+
+    def test_incremental_emission(self):
+        engine, on_text = self._make_engine()
+
+        # First update
+        engine._process_segments([{"text": "hello", "completed": False}])
+        on_text.assert_called_with("hello")
+
+        # Second update extends text
+        engine._process_segments([{"text": "hello world", "completed": True}])
+        assert on_text.call_count == 2
+        on_text.assert_called_with("world")
+
+    def test_same_text_not_re_emitted(self):
+        engine, on_text = self._make_engine()
+        engine._process_segments([{"text": "hello", "completed": False}])
+        engine._process_segments([{"text": "hello", "completed": False}])
+        assert on_text.call_count == 1  # only first call
+
+    def test_empty_segments_ignored(self):
+        engine, on_text = self._make_engine()
+        engine._process_segments([])
         on_text.assert_not_called()
 
-    def test_delta_message_logged(self):
+    def test_empty_text_ignored(self):
         engine, on_text = self._make_engine()
-        engine._handle_message(
-            "conversation.item.input_audio_transcription.delta",
-            {"delta": "hel"},
-        )
+        engine._process_segments([{"text": "", "completed": True}])
         on_text.assert_not_called()
 
-    def test_error_message_logged(self):
+    def test_multiple_segments_concatenated(self):
         engine, on_text = self._make_engine()
-        engine._handle_message(
-            "error",
-            {"error": {"message": "model not found"}},
-        )
-        on_text.assert_not_called()
+        segments = [
+            {"text": "hello", "completed": True},
+            {"text": "world", "completed": True},
+        ]
+        engine._process_segments(segments)
+        on_text.assert_called_once_with("hello world")
 
-    def test_session_created(self):
-        engine, on_text = self._make_engine()
-        engine._handle_message("session.created", {})
-        on_text.assert_not_called()
+    def test_completed_sets_flush_done(self):
+        engine, _ = self._make_engine()
+        engine._flush_done.clear()
+        segments = [{"text": "done", "completed": True}]
+        engine._process_segments(segments)
+        assert engine._flush_done.is_set()
 
-    def test_unknown_message_type(self):
-        engine, on_text = self._make_engine()
-        engine._handle_message("some.unknown.type", {"data": 123})
-        on_text.assert_not_called()
+    def test_partial_does_not_set_flush_done(self):
+        engine, _ = self._make_engine()
+        engine._flush_done.clear()
+        segments = [{"text": "partial", "completed": False}]
+        engine._process_segments(segments)
+        assert not engine._flush_done.is_set()
+
+
+# ---------------------------------------------------------------------------
+# Sender loop
+# ---------------------------------------------------------------------------
 
 
 class TestWebSocketEngineSenderLoop:
-    def test_sender_sends_queued_messages(self):
+    def test_sender_sends_binary_audio(self):
         mock_ws = MagicMock()
         engine = WebSocketEngine(
-            server_url="http://localhost:10300",
+            server_url="http://localhost:9090",
             model="tiny",
             language="en",
             on_text=MagicMock(),
         )
         engine._ws = mock_ws
 
-        # Queue a message then shutdown signal
-        engine._send_queue.put('{"type": "test"}')
+        engine._send_queue.put(b"\x00" * 1024)
+        engine._send_queue.put(None)  # shutdown
+
+        engine._sender_loop()
+        mock_ws.send.assert_called_once_with(b"\x00" * 1024)
+
+    def test_sender_sends_end_of_audio(self):
+        mock_ws = MagicMock()
+        engine = WebSocketEngine(
+            server_url="http://localhost:9090",
+            model="tiny",
+            language="en",
+            on_text=MagicMock(),
+        )
+        engine._ws = mock_ws
+
+        engine._send_queue.put(b"__END__")
         engine._send_queue.put(None)
 
         engine._sender_loop()
-
-        mock_ws.send.assert_called_once_with('{"type": "test"}')
+        mock_ws.send.assert_called_once_with("END_OF_AUDIO")
 
     def test_sender_exits_on_send_error(self):
         mock_ws = MagicMock()
         mock_ws.send.side_effect = RuntimeError("broken pipe")
         engine = WebSocketEngine(
-            server_url="http://localhost:10300",
+            server_url="http://localhost:9090",
             model="tiny",
             language="en",
             on_text=MagicMock(),
         )
         engine._ws = mock_ws
-        engine._send_queue.put('{"type": "test"}')
+        engine._send_queue.put(b"\x00" * 100)
+        engine._sender_loop()
 
-        engine._sender_loop()  # should not raise
+    def test_sender_exits_when_ws_none(self):
+        engine = WebSocketEngine(
+            server_url="http://localhost:9090",
+            model="tiny",
+            language="en",
+            on_text=MagicMock(),
+        )
+        engine._ws = None
+        engine._send_queue.put(b"\x00" * 100)
+        engine._sender_loop()
+
+    def test_sender_handles_empty_queue_then_stops(self):
+        engine = WebSocketEngine(
+            server_url="http://localhost:9090",
+            model="tiny",
+            language="en",
+            on_text=MagicMock(),
+        )
+        engine._ws = MagicMock()
+
+        def delayed_stop():
+            import time
+            time.sleep(0.15)
+            engine._stop_event.set()
+
+        t = threading.Thread(target=delayed_stop, daemon=True)
+        t.start()
+        engine._sender_loop()
+        t.join(timeout=1.0)
+
+
+# ---------------------------------------------------------------------------
+# Receiver loop
+# ---------------------------------------------------------------------------
 
 
 class TestWebSocketEngineReceiverLoop:
-    def test_receiver_dispatches_transcription(self):
+    def test_receiver_dispatches_segments(self):
         on_text = MagicMock()
         mock_ws = MagicMock()
 
-        msg = json.dumps({
-            "type": "conversation.item.input_audio_transcription.completed",
-            "transcript": "hello",
-        })
-        # First recv returns message, second raises to exit loop
+        msg = json.dumps({"segments": [{"text": "hello", "completed": True}]})
         mock_ws.recv.side_effect = [msg, RuntimeError("closed")]
 
         engine = WebSocketEngine(
-            server_url="http://localhost:10300",
+            server_url="http://localhost:9090",
             model="tiny",
             language="en",
             on_text=on_text,
         )
         engine._ws = mock_ws
-
         engine._receiver_loop()
 
         on_text.assert_called_once_with("hello")
@@ -529,14 +674,13 @@ class TestWebSocketEngineReceiverLoop:
 
         mock_ws.recv = mock_recv
         engine = WebSocketEngine(
-            server_url="http://localhost:10300",
+            server_url="http://localhost:9090",
             model="tiny",
             language="en",
             on_text=MagicMock(),
         )
         engine._ws = mock_ws
-
-        engine._receiver_loop()  # should not raise
+        engine._receiver_loop()
         assert call_count[0] == 2
 
     def test_receiver_handles_invalid_json(self):
@@ -544,181 +688,44 @@ class TestWebSocketEngineReceiverLoop:
         mock_ws.recv.side_effect = ["not json", RuntimeError("closed")]
 
         engine = WebSocketEngine(
-            server_url="http://localhost:10300",
+            server_url="http://localhost:9090",
             model="tiny",
             language="en",
             on_text=MagicMock(),
         )
         engine._ws = mock_ws
+        engine._receiver_loop()
 
-        engine._receiver_loop()  # should not raise
+    def test_receiver_ignores_binary_frames(self):
+        mock_ws = MagicMock()
+        mock_ws.recv.side_effect = [b"\x00\x00", RuntimeError("closed")]
+
+        engine = WebSocketEngine(
+            server_url="http://localhost:9090",
+            model="tiny",
+            language="en",
+            on_text=MagicMock(),
+        )
+        engine._ws = mock_ws
+        engine._receiver_loop()
 
     def test_receiver_exits_on_stop_event(self):
         engine = WebSocketEngine(
-            server_url="http://localhost:10300",
+            server_url="http://localhost:9090",
             model="tiny",
             language="en",
             on_text=MagicMock(),
         )
         engine._stop_event.set()
         engine._ws = MagicMock()
-
-        engine._receiver_loop()  # should exit immediately
+        engine._receiver_loop()
 
     def test_receiver_exits_when_ws_none(self):
         engine = WebSocketEngine(
-            server_url="http://localhost:10300",
-            model="tiny",
-            language="en",
-            on_text=MagicMock(),
-        )
-        engine._ws = None  # ws already cleared by close()
-
-        engine._receiver_loop()  # should exit immediately
-
-
-class TestWebSocketEngineSenderLoopEdgeCases:
-    def test_sender_exits_when_ws_none(self):
-        engine = WebSocketEngine(
-            server_url="http://localhost:10300",
+            server_url="http://localhost:9090",
             model="tiny",
             language="en",
             on_text=MagicMock(),
         )
         engine._ws = None
-        engine._send_queue.put('{"type": "test"}')
-
-        engine._sender_loop()  # should exit on ws=None check
-
-    def test_sender_handles_empty_queue_then_stops(self):
-        """Sender loop: empty queue triggers continue, then stop_event exits."""
-        import threading
-
-        engine = WebSocketEngine(
-            server_url="http://localhost:10300",
-            model="tiny",
-            language="en",
-            on_text=MagicMock(),
-        )
-        engine._ws = MagicMock()
-
-        # Set stop_event after a short delay so the loop runs at least once with empty queue
-        def delayed_stop():
-            import time
-            time.sleep(0.15)
-            engine._stop_event.set()
-
-        t = threading.Thread(target=delayed_stop, daemon=True)
-        t.start()
-        engine._sender_loop()  # runs, hits queue.Empty, continues, then stop_event exits
-        t.join(timeout=1.0)
-
-
-class TestWebSocketEngineWaitForCompletion:
-    def test_returns_true_when_completed(self):
-        engine = WebSocketEngine(
-            server_url="http://localhost:10300",
-            model="tiny",
-            language="en",
-            on_text=MagicMock(),
-        )
-        engine._flush_done.set()
-        assert engine.wait_for_completion(timeout=0.1) is True
-
-    def test_returns_false_on_timeout(self):
-        engine = WebSocketEngine(
-            server_url="http://localhost:10300",
-            model="tiny",
-            language="en",
-            on_text=MagicMock(),
-        )
-        assert engine.wait_for_completion(timeout=0.01) is False
-
-
-class TestWebSocketEngineCloseEdgeCases:
-    def test_close_with_full_queue(self):
-        """Close when queue is full — sentinel put_nowait should handle Full."""
-        engine = WebSocketEngine(
-            server_url="http://localhost:10300",
-            model="tiny",
-            language="en",
-            on_text=MagicMock(),
-        )
-        engine._connected.set()
-        # Fill the queue completely
-        for _ in range(engine._send_queue.maxsize):
-            engine._send_queue.put_nowait("filler")
-
-        engine.close()  # should not raise despite full queue
-
-    def test_close_drains_queue(self):
-        """Close drains remaining queued items."""
-        engine = WebSocketEngine(
-            server_url="http://localhost:10300",
-            model="tiny",
-            language="en",
-            on_text=MagicMock(),
-        )
-        engine._send_queue.put("item1")
-        engine._send_queue.put("item2")
-
-        engine.close()
-        assert engine._send_queue.empty()
-
-    def test_flush_when_queue_full(self):
-        """Flush when queue is full — should not raise."""
-        engine = WebSocketEngine(
-            server_url="http://localhost:10300",
-            model="tiny",
-            language="en",
-            on_text=MagicMock(),
-        )
-        engine._connected.set()
-        for _ in range(engine._send_queue.maxsize):
-            engine._send_queue.put_nowait("filler")
-
-        engine.flush()  # should not raise
-
-    def test_close_warns_on_stuck_threads(self):
-        """Close logs warnings when threads don't exit within timeout."""
-        import threading
-
-        engine = WebSocketEngine(
-            server_url="http://localhost:10300",
-            model="tiny",
-            language="en",
-            on_text=MagicMock(),
-        )
-        # Create mock threads that report as still alive after join
-        mock_sender = MagicMock(spec=threading.Thread)
-        mock_sender.is_alive.return_value = True
-        mock_receiver = MagicMock(spec=threading.Thread)
-        mock_receiver.is_alive.return_value = True
-
-        engine._sender_thread = mock_sender
-        engine._receiver_thread = mock_receiver
-
-        engine.close()
-
-        mock_sender.join.assert_called_once_with(timeout=2.0)
-        mock_receiver.join.assert_called_once_with(timeout=2.0)
-
-    def test_close_drain_handles_concurrent_empty(self):
-        """Queue drain handles race where queue empties between empty() and get_nowait()."""
-        import queue as queue_mod
-
-        engine = WebSocketEngine(
-            server_url="http://localhost:10300",
-            model="tiny",
-            language="en",
-            on_text=MagicMock(),
-        )
-        # Mock queue that says not empty but raises Empty on get
-        mock_queue = MagicMock(spec=queue_mod.Queue)
-        empty_calls = [False, True]  # first call: not empty, second: empty
-        mock_queue.empty.side_effect = lambda: empty_calls.pop(0) if empty_calls else True
-        mock_queue.get_nowait.side_effect = queue_mod.Empty
-        mock_queue.put_nowait = MagicMock()
-        engine._send_queue = mock_queue
-
-        engine.close()  # should not raise
+        engine._receiver_loop()

@@ -126,8 +126,7 @@ class DictationDaemon:
                 language=self.config.server.language,
                 reconnect_attempts=ws_cfg.reconnect_attempts,
                 reconnect_delay=ws_cfg.reconnect_delay,
-                server_vad_silence_ms=ws_cfg.server_vad_silence_ms,
-                server_vad_threshold=ws_cfg.server_vad_threshold,
+                use_vad=True,
                 on_text=self._on_ws_text,
             )
             try:

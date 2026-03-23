@@ -29,7 +29,7 @@ from whisper_dictation.config import (
 class TestDefaults:
     def test_server_defaults(self):
         cfg = ServerConfig()
-        assert cfg.url == "http://localhost:10300"
+        assert cfg.url == "http://localhost:9090"
         assert cfg.model == "Systran/faster-whisper-large-v3"
         assert cfg.language == "en"
         assert cfg.timeout == 10
@@ -103,7 +103,7 @@ class TestBuildSection:
     def test_partial_override(self):
         section = _build_section({"language": "fr"}, ServerConfig)
         assert section.language == "fr"
-        assert section.url == "http://localhost:10300"  # default preserved
+        assert section.url == "http://localhost:9090"  # default preserved
 
     def test_all_sections(self):
         for cls in (ServerConfig, HotkeyConfig, VADConfig, AudioConfig, EngineConfig):
@@ -233,7 +233,7 @@ class TestLoadConfig:
         with patch.dict("os.environ", {}, clear=True):
             cfg = load_config(toml_path)
         assert cfg.server.model == "tiny"
-        assert cfg.server.url == "http://localhost:10300"  # default
+        assert cfg.server.url == "http://localhost:9090"  # default
         assert cfg.hotkey == HotkeyConfig()  # all defaults
 
     def test_toml_with_unknown_keys(self, tmp_path):
@@ -403,12 +403,3 @@ class TestValidate:
         with pytest.raises(ValueError, match="websocket.reconnect_delay"):
             validate(cfg)
 
-    def test_ws_silence_ms_zero(self):
-        cfg = Config(websocket=WebSocketConfig(server_vad_silence_ms=0))
-        with pytest.raises(ValueError, match="websocket.server_vad_silence_ms"):
-            validate(cfg)
-
-    def test_ws_vad_threshold_out_of_range(self):
-        cfg = Config(websocket=WebSocketConfig(server_vad_threshold=1.5))
-        with pytest.raises(ValueError, match="websocket.server_vad_threshold"):
-            validate(cfg)

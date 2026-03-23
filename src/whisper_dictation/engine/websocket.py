@@ -1,22 +1,22 @@
-"""WebSocket streaming engine — real-time transcription via Speaches Realtime API."""
+"""WebSocket streaming engine — real-time transcription via WhisperLive server."""
 
 from __future__ import annotations
 
-import base64
 import json
 import logging
 import queue
 import threading
 import time
+import uuid
 from collections.abc import Callable
-from urllib.parse import urlencode, urlparse, urlunparse
+from urllib.parse import urlparse, urlunparse
 
 import numpy as np
 import websockets.sync.client as ws_sync
 
 log = logging.getLogger(__name__)
 
-# Max queued audio messages before dropping (~3s at 32ms chunks)
+# Max queued audio frames before dropping (~3s at 32ms chunks)
 _MAX_SEND_QUEUE = 100
 
 
@@ -27,76 +27,51 @@ def _http_to_ws_url(http_url: str) -> str:
     return urlunparse(parsed._replace(scheme=scheme))
 
 
-def _build_session_update(
+def _build_config_message(
     *,
-    silence_duration_ms: int = 500,
-    vad_threshold: float = 0.5,
+    uid: str,
+    language: str = "en",
+    model: str = "small",
+    use_vad: bool = True,
 ) -> dict:
-    """Build a session.update message for the Realtime API."""
+    """Build the WhisperLive handshake config message."""
     return {
-        "type": "session.update",
-        "session": {
-            "input_audio_transcription": {},
-            "turn_detection": {
-                "type": "server_vad",
-                "silence_duration_ms": silence_duration_ms,
-                "threshold": vad_threshold,
-                "create_response": False,
-            },
-        },
+        "uid": uid,
+        "language": language,
+        "task": "transcribe",
+        "model": model,
+        "use_vad": use_vad,
     }
 
 
-def _build_audio_append(audio_b64: str) -> dict:
-    """Build an input_audio_buffer.append message."""
-    return {
-        "type": "input_audio_buffer.append",
-        "audio": audio_b64,
-    }
+def _audio_to_float32_bytes(audio: np.ndarray) -> bytes:
+    """Convert audio to float32 PCM bytes for WhisperLive.
 
-
-def _build_audio_commit() -> dict:
-    """Build an input_audio_buffer.commit message."""
-    return {"type": "input_audio_buffer.commit"}
-
-
-def _resample_16k_to_24k(audio: np.ndarray) -> np.ndarray:
-    """Resample 16kHz audio to 24kHz using linear interpolation (ratio 3:2)."""
-    n = len(audio)
-    if n == 0:
-        return audio
-    new_n = n * 3 // 2
-    indices = np.arange(new_n) * (n - 1) / (new_n - 1) if new_n > 1 else np.array([0.0])
-    return np.interp(indices, np.arange(n), audio)
-
-
-def _encode_audio_b64(audio: np.ndarray, resample_24k: bool = True) -> str:
-    """Encode audio as base64 PCM int16, optionally resampling 16kHz→24kHz.
-
-    The Speaches Realtime API expects 24kHz PCM16 mono audio.
+    WhisperLive expects raw float32 PCM at 16kHz mono as binary WS frames.
     """
     if audio.dtype in (np.float32, np.float64):
-        if resample_24k:
-            audio = _resample_16k_to_24k(audio)
-        pcm = (audio * 32768).clip(-32768, 32767).astype(np.int16)
-    else:
-        if resample_24k:
-            audio = _resample_16k_to_24k(audio.astype(np.float32) / 32768.0)
-            pcm = (audio * 32768).clip(-32768, 32767).astype(np.int16)
-        else:
-            pcm = audio.astype(np.int16)
-    return base64.b64encode(pcm.tobytes()).decode("ascii")
+        return audio.astype(np.float32).tobytes()
+    # int16 → float32
+    return (audio.astype(np.float32) / 32768.0).tobytes()
 
 
 class WebSocketEngine:
-    """Real-time streaming transcription via WebSocket.
+    """Real-time streaming transcription via WhisperLive WebSocket.
 
-    Connects to a Speaches-compatible Realtime API endpoint. Audio chunks
-    are streamed continuously; transcription results arrive asynchronously
-    via the on_text callback.
+    Connects to a WhisperLive server. Audio chunks are streamed as binary
+    float32 PCM frames; transcription results arrive as JSON with completed
+    and partial segments.
 
-    This does NOT implement the TranscriptionEngine ABC because the interface
-    is fundamentally different: async callbacks vs synchronous request/response.
+    Protocol:
+    1. Connect to ws://<host>:<port>
+    2. Send JSON config message (uid, language, model, use_vad)
+    3. Wait for SERVER_READY
+    4. Stream audio as binary float32 frames
+    5. Receive JSON segments with completed/partial flags
+    6. Send END_OF_AUDIO text frame when done
+
+    This does NOT implement TranscriptionEngine ABC — async callbacks
+    vs synchronous request/response.
     """
 
     def __init__(
@@ -107,8 +82,7 @@ class WebSocketEngine:
         language: str,
         reconnect_attempts: int = 3,
         reconnect_delay: float = 1.0,
-        server_vad_silence_ms: int = 500,
-        server_vad_threshold: float = 0.5,
+        use_vad: bool = True,
         on_text: Callable[[str], None],
     ):
         self._server_url = server_url.rstrip("/")
@@ -116,34 +90,35 @@ class WebSocketEngine:
         self._language = language
         self._reconnect_attempts = reconnect_attempts
         self._reconnect_delay = reconnect_delay
-        self._server_vad_silence_ms = server_vad_silence_ms
-        self._server_vad_threshold = server_vad_threshold
+        self._use_vad = use_vad
         self._on_text = on_text
+        self._uid = str(uuid.uuid4())
 
         self._ws = None
-        self._send_queue: queue.Queue[str | None] = queue.Queue(maxsize=_MAX_SEND_QUEUE)
+        self._send_queue: queue.Queue[bytes | None] = queue.Queue(maxsize=_MAX_SEND_QUEUE)
         self._sender_thread: threading.Thread | None = None
         self._receiver_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._connected = threading.Event()
-        self._flush_done = threading.Event()  # set when server finishes processing after commit
+        self._flush_done = threading.Event()
+
+        # Track last emitted text to only type new content
+        self._last_emitted = ""
 
     @property
     def ws_url(self) -> str:
-        """Construct the WebSocket URL with model and language query params."""
-        base = _http_to_ws_url(self._server_url)
-        params = {"intent": "transcription", "model": self._model}
-        if self._language:
-            params["language"] = self._language
-        return f"{base}/v1/realtime?{urlencode(params)}"
+        """Construct the WebSocket URL."""
+        return _http_to_ws_url(self._server_url)
 
     def connect(self) -> None:
-        """Open WebSocket connection with retry, start sender/receiver threads."""
+        """Open WebSocket connection with retry, send config, start threads."""
         self._stop_event.clear()
         self._connected.clear()
+        self._last_emitted = ""
+        self._uid = str(uuid.uuid4())
 
         last_error: Exception | None = None
-        attempts = self._reconnect_attempts + 1  # first attempt + retries
+        attempts = self._reconnect_attempts + 1
 
         for attempt in range(attempts):
             try:
@@ -165,48 +140,49 @@ class WebSocketEngine:
             log.error("WebSocket connection failed after %d attempts: %s", attempts, self.ws_url)
             raise last_error  # type: ignore[misc]
 
-        # Send session configuration
-        session_msg = _build_session_update(
-            silence_duration_ms=self._server_vad_silence_ms,
-            vad_threshold=self._server_vad_threshold,
+        # Send WhisperLive config handshake
+        config_msg = _build_config_message(
+            uid=self._uid,
+            language=self._language,
+            model=self._model,
+            use_vad=self._use_vad,
         )
-        self._ws.send(json.dumps(session_msg))
-        self._connected.set()
+        self._ws.send(json.dumps(config_msg))
 
-        # Start sender thread (reads from queue, writes to WS)
-        self._sender_thread = threading.Thread(target=self._sender_loop, daemon=True)
-        self._sender_thread.start()
-
-        # Start receiver thread (reads from WS, calls on_text)
+        # Start receiver first (to catch SERVER_READY)
         self._receiver_thread = threading.Thread(target=self._receiver_loop, daemon=True)
         self._receiver_thread.start()
 
-        log.info("WebSocket connected: %s", self.ws_url)
+        # Start sender thread
+        self._sender_thread = threading.Thread(target=self._sender_loop, daemon=True)
+        self._sender_thread.start()
+
+        self._connected.set()
+        log.info("WebSocket connected: %s (uid=%s)", self.ws_url, self._uid[:8])
 
     def send_audio(self, audio: np.ndarray) -> None:
         """Queue audio for sending. Thread-safe, non-blocking."""
         if not self._connected.is_set():
             return
-        b64 = _encode_audio_b64(audio)
-        msg = json.dumps(_build_audio_append(b64))
+        pcm_bytes = _audio_to_float32_bytes(audio)
         try:
-            self._send_queue.put_nowait(msg)
+            self._send_queue.put_nowait(pcm_bytes)
         except queue.Full:
             log.debug("Send queue full, dropping audio chunk")
 
     def flush(self) -> None:
-        """Send commit message to trigger server-side processing of remaining audio."""
+        """Send END_OF_AUDIO to signal end of stream."""
         if not self._connected.is_set():
             return
         self._flush_done.clear()
-        msg = json.dumps(_build_audio_commit())
+        # Queue a sentinel bytes value that sender recognizes as END_OF_AUDIO
         try:
-            self._send_queue.put_nowait(msg)
+            self._send_queue.put_nowait(b"__END__")
         except queue.Full:
             pass
 
     def wait_for_completion(self, timeout: float = 5.0) -> bool:
-        """Wait for server to finish processing after flush. Returns True if completed."""
+        """Wait for server to finish processing after flush."""
         return self._flush_done.wait(timeout=timeout)
 
     def close(self) -> None:
@@ -220,7 +196,6 @@ class WebSocketEngine:
         except queue.Full:
             pass
 
-        # Close WS — unblocks recv() in receiver thread
         ws = self._ws
         self._ws = None
         if ws is not None:
@@ -240,7 +215,6 @@ class WebSocketEngine:
                 log.warning("WebSocket receiver thread did not exit within timeout")
             self._receiver_thread = None
 
-        # Drain remaining queued items
         while not self._send_queue.empty():
             try:
                 self._send_queue.get_nowait()
@@ -250,7 +224,7 @@ class WebSocketEngine:
         log.info("WebSocket closed")
 
     def is_available(self) -> bool:
-        """Check if the Realtime API endpoint is reachable."""
+        """Check if the WhisperLive server is reachable."""
         try:
             ws = ws_sync.connect(self.ws_url, close_timeout=3, open_timeout=3)
             ws.close()
@@ -259,30 +233,33 @@ class WebSocketEngine:
             return False
 
     def _sender_loop(self) -> None:
-        """Send queued messages to WebSocket."""
+        """Send queued audio frames to WebSocket."""
         while not self._stop_event.is_set():
             try:
-                msg = self._send_queue.get(timeout=0.1)
+                data = self._send_queue.get(timeout=0.1)
             except queue.Empty:
                 continue
 
-            if msg is None:
+            if data is None:
                 break  # shutdown signal
 
-            ws = self._ws  # capture locally to avoid TOCTOU
+            ws = self._ws
             if ws is None:
                 break
 
             try:
-                ws.send(msg)
+                if data == b"__END__":
+                    ws.send("END_OF_AUDIO")
+                else:
+                    ws.send(data)
             except Exception:
                 log.debug("WebSocket send failed", exc_info=True)
                 break
 
     def _receiver_loop(self) -> None:
-        """Receive messages from WebSocket and dispatch."""
+        """Receive JSON messages from WhisperLive and dispatch."""
         while not self._stop_event.is_set():
-            ws = self._ws  # capture locally to avoid TOCTOU
+            ws = self._ws
             if ws is None:
                 break
 
@@ -295,34 +272,73 @@ class WebSocketEngine:
                     log.debug("WebSocket recv error", exc_info=True)
                 break
 
+            # WhisperLive sends JSON text frames
+            if isinstance(raw, bytes):
+                log.debug("WS binary frame ignored (%d bytes)", len(raw))
+                continue
+
             try:
                 msg = json.loads(raw)
             except (json.JSONDecodeError, TypeError):
                 log.debug("Invalid JSON from WebSocket: %r", raw[:200] if raw else raw)
                 continue
 
-            msg_type = msg.get("type", "")
-            self._handle_message(msg_type, msg)
+            self._handle_message(msg)
 
-    def _handle_message(self, msg_type: str, msg: dict) -> None:
-        """Dispatch a received WebSocket message by type."""
-        if msg_type == "conversation.item.input_audio_transcription.completed":
-            transcript = msg.get("transcript", "").strip()
-            if transcript:
-                log.debug("WS transcription: %s", transcript[:80])
-                self._on_text(transcript)
+    def _handle_message(self, msg: dict) -> None:
+        """Process a WhisperLive JSON message."""
+        # SERVER_READY handshake response
+        if msg.get("message") == "SERVER_READY":
+            log.debug("WS server ready (backend=%s)", msg.get("backend", "?"))
+            return
+
+        # WAIT message (server busy)
+        if msg.get("status") == "WAIT":
+            log.warning("WS server busy, wait %s minutes", msg.get("message", "?"))
+            return
+
+        # Transcription segments
+        segments = msg.get("segments")
+        if segments is not None:
+            self._process_segments(segments)
+            return
+
+        # Language detection
+        if "language" in msg and "language_prob" in msg:
+            log.debug("WS detected language: %s (%.0f%%)", msg["language"], msg["language_prob"] * 100)
+            return
+
+        log.debug("WS unhandled message: %s", str(msg)[:200])
+
+    def _process_segments(self, segments: list[dict]) -> None:
+        """Process transcription segments and emit new text.
+
+        WhisperLive segments have:
+        - text: the transcribed text
+        - completed: True if finalized, False if partial/interim
+
+        We concatenate all segment text and emit only the new portion
+        (diff against what was previously emitted).
+        """
+        if not segments:
+            return
+
+        # Build full text from all segments
+        full_text = " ".join(seg.get("text", "").strip() for seg in segments).strip()
+        if not full_text:
+            return
+
+        # Check if the last segment is completed (final)
+        last_completed = segments[-1].get("completed", False)
+
+        # Emit only new text (diff from last emitted)
+        if len(full_text) > len(self._last_emitted):
+            new_text = full_text[len(self._last_emitted):].strip()
+            if new_text:
+                log.debug("WS text (%s): %s", "final" if last_completed else "partial", new_text[:80])
+                self._on_text(new_text)
+                self._last_emitted = full_text
+
+        # Signal completion when all segments are finalized
+        if last_completed:
             self._flush_done.set()
-
-        elif msg_type == "conversation.item.input_audio_transcription.delta":
-            delta = msg.get("delta", "")
-            log.debug("WS delta: %s", delta[:80] if delta else "")
-
-        elif msg_type == "error":
-            error = msg.get("error", {})
-            log.error("WebSocket server error: %s", error.get("message", str(error)))
-
-        elif msg_type in ("session.created", "session.updated"):
-            log.debug("WS session: %s", msg_type)
-
-        else:
-            log.debug("WS unhandled message type: %s", msg_type)

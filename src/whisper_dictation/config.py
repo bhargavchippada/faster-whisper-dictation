@@ -26,7 +26,7 @@ LOG_FILE = CONFIG_DIR / "daemon.log"
 
 @dataclass(frozen=True)
 class ServerConfig:
-    url: str = "http://localhost:10300"
+    url: str = "http://localhost:9090"
     model: str = "Systran/faster-whisper-large-v3"
     language: str = "en"
     timeout: int = 10
@@ -67,8 +67,6 @@ class EngineConfig:
 class WebSocketConfig:
     reconnect_attempts: int = 3
     reconnect_delay: float = 1.0
-    server_vad_silence_ms: int = 500
-    server_vad_threshold: float = 0.5
 
 
 @dataclass(frozen=True)
@@ -104,8 +102,6 @@ def _apply_env_overrides(config: Config) -> Config:
         "DICTATION_VAD_MAX_SPEECH_S": ("vad", "max_speech_s"),
         "DICTATION_WS_RECONNECT_ATTEMPTS": ("websocket", "reconnect_attempts"),
         "DICTATION_WS_RECONNECT_DELAY": ("websocket", "reconnect_delay"),
-        "DICTATION_WS_SILENCE_MS": ("websocket", "server_vad_silence_ms"),
-        "DICTATION_WS_VAD_THRESHOLD": ("websocket", "server_vad_threshold"),
     }
 
     sections: dict[str, dict] = {
@@ -232,14 +228,6 @@ def validate(config: Config) -> None:
         errors.append(f"websocket.reconnect_attempts must be >= 0, got {ws.reconnect_attempts}")
     if not (0.0 < ws.reconnect_delay <= 30.0):
         errors.append(f"websocket.reconnect_delay must be 0.0-30.0, got {ws.reconnect_delay}")
-    if ws.server_vad_silence_ms <= 0:
-        errors.append(
-            f"websocket.server_vad_silence_ms must be positive, got {ws.server_vad_silence_ms}"
-        )
-    if not (0.0 <= ws.server_vad_threshold <= 1.0):
-        errors.append(
-            f"websocket.server_vad_threshold must be 0.0-1.0, got {ws.server_vad_threshold}"
-        )
 
     if errors:
         raise ValueError("Invalid configuration:\n  - " + "\n  - ".join(errors))
