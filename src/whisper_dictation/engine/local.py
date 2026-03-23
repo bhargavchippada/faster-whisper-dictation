@@ -37,7 +37,7 @@ class LocalEngine(TranscriptionEngine):
             except ImportError:
                 raise RuntimeError(
                     "faster-whisper not installed. "
-                    "Install with: pip install 'whisper-dictation[local]'"
+                    "Install with: pip install 'faster-whisper-dictation[local]'"
                 )
 
             device = self._device
