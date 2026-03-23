@@ -167,6 +167,26 @@ class TestAudioStream:
         assert call_kwargs["device"] == "My USB Microphone"
 
     @patch("whisper_dictation.audio.sd")
+    def test_start_with_unmatched_device_warns(self, mock_sd, caplog):
+        mock_sd.query_devices.return_value = [
+            {"name": "Built-in Mic", "max_input_channels": 1},
+        ]
+        mock_sd.InputStream.return_value = MagicMock()
+
+        cfg = AudioConfig(sample_rate=16000, channels=1, device="nonexistent")
+        stream = AudioStream(cfg, MagicMock())
+
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            stream.start()
+
+        assert "not found" in caplog.text
+        # Should pass the original string as-is to sounddevice
+        call_kwargs = mock_sd.InputStream.call_args[1]
+        assert call_kwargs["device"] == "nonexistent"
+
+    @patch("whisper_dictation.audio.sd")
     def test_stop(self, mock_sd):
         cfg = AudioConfig(sample_rate=16000, channels=1, device=None)
         stream = AudioStream(cfg, MagicMock())

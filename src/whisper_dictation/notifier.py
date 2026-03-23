@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import subprocess
 import sys
 
@@ -21,8 +22,6 @@ def notify(title: str, message: str = "") -> None:
         elif sys.platform == "darwin":
             # Escape characters that break AppleScript string literals
             def _applescript_escape(s: str) -> str:
-                import re
-
                 s = s.replace("\\", "\\\\").replace('"', '\\"')
                 s = s.replace("\n", "\\n").replace("\r", "\\r")
                 return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", s)

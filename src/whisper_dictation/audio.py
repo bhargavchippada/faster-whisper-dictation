@@ -81,10 +81,14 @@ class AudioStream:
         device = self.config.device
         # Try to find device by name if string
         if isinstance(device, str):
+            matched = False
             for d in sd.query_devices():
                 if device.lower() in d["name"].lower() and d["max_input_channels"] > 0:
                     device = d["name"]
+                    matched = True
                     break
+            if not matched:
+                log.warning("Audio device %r not found, passing as-is to sounddevice", device)
 
         log.info(
             "Starting audio capture: device=%s, rate=%d, block=%d",

@@ -19,7 +19,8 @@ class ServerEngine(TranscriptionEngine):
 
     def __init__(self, config: ServerConfig):
         self.config = config
-        self._url = f"{config.url.rstrip('/')}/v1/audio/transcriptions"
+        self._base_url = config.url.rstrip("/")
+        self._url = f"{self._base_url}/v1/audio/transcriptions"
 
     def transcribe(self, audio: np.ndarray, sample_rate: int = 16000) -> str:
         wav_data = audio_to_wav(audio, sample_rate)
@@ -56,7 +57,7 @@ class ServerEngine(TranscriptionEngine):
     def is_available(self) -> bool:
         try:
             resp = requests.get(
-                f"{self.config.url.rstrip('/')}/health",
+                f"{self._base_url}/health",
                 timeout=3,
             )
             return resp.ok

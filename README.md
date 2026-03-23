@@ -150,6 +150,9 @@ faster-whisper-dictation start --server-url http://my-server:10300
 # Use local engine instead of server
 faster-whisper-dictation start --engine local
 
+# Enable real-time streaming (text appears as you speak)
+faster-whisper-dictation start --streaming
+
 # Check status
 faster-whisper-dictation status
 
@@ -184,6 +187,9 @@ url = "http://localhost:10300"
 model = "Systran/faster-whisper-large-v3"
 language = "en"
 timeout = 10            # request timeout in seconds
+# prompt = ""           # bias transcription (e.g. domain vocabulary)
+# temperature = 0.0     # 0.0 = accurate, higher = creative
+# hotwords = ""         # comma-separated words to boost recognition
 
 [hotkey]
 binding = "alt+v"       # any key combo supported by your platform
@@ -214,6 +220,9 @@ device = "auto"          # "auto", "cuda", "cpu"
 | `WHISPER_MODEL` | `Systran/faster-whisper-large-v3` | Model name |
 | `WHISPER_LANG` | `en` | Language code |
 | `WHISPER_TIMEOUT` | `10` | Request timeout (seconds) |
+| `WHISPER_PROMPT` | (empty) | Bias transcription (e.g. domain vocabulary) |
+| `WHISPER_TEMPERATURE` | `0.0` | Transcription temperature (0.0 = accurate) |
+| `WHISPER_HOTWORDS` | (empty) | Comma-separated words to boost recognition |
 | `DICTATION_HOTKEY` | `alt+v` | Hotkey binding |
 | `DICTATION_MODE` | `toggle` | `toggle` or `hold` |
 | `DICTATION_ENGINE` | `server` | `server` or `local` |
@@ -247,7 +256,7 @@ faster-whisper-dictation/
 │   ├── vad.py              # Silero VAD (ONNX, SHA-256 verified)
 │   ├── typer.py            # Platform-aware text input (clipboard + paste)
 │   └── notifier.py         # Cross-platform desktop notifications
-├── tests/                  # 306 tests, 100% coverage
+├── tests/                  # 307 tests, 100% coverage
 ├── .github/workflows/      # CI: lint + test on Python 3.10-3.14
 ├── docker-compose.yml      # GPU server
 ├── docker-compose.cpu.yml  # CPU server
@@ -322,6 +331,7 @@ faster-whisper-dictation start --server-url https://api.groq.com/openai
 | Wrong microphone | List devices with `faster-whisper-dictation devices` and set `audio.device` in config. |
 | Text in wrong window | Text is typed into the focused window when transcription completes. Keep focus on target app. |
 | Whisper hallucinations | Increase VAD threshold: `vad.threshold = 0.7` in config. |
+| Wrong words (e.g. "passed" instead of "fast") | Set `server.prompt` or `server.hotwords` in config to bias transcription. |
 | ydotool not working | Run `sudo systemctl start ydotool` and add user to `input` group. |
 | Docker volume permission error | `docker compose down && docker volume rm faster-whisper-dictation_faster-whisper-models && docker compose up -d` |
 

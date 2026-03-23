@@ -212,9 +212,6 @@ class SpeechDetector:
             - Otherwise audio_data is None.
         """
         self._ensure_model()
-        return self._process_chunk_locked(audio)
-
-    def _process_chunk_locked(self, audio: np.ndarray) -> tuple[bool, np.ndarray | None]:
         with self._lock:
             return self._process_chunk_impl(audio)
 

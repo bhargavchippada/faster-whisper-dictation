@@ -8,9 +8,9 @@ Real-time speech-to-text dictation tool. Captures microphone audio, detects spee
 
 ```
 src/whisper_dictation/
-├── cli.py              # CLI: start, stop, status, devices, transcribe
+├── cli.py              # CLI: start, stop, status, config, devices, transcribe
 ├── config.py           # TOML config + env vars + CLI flags (frozen dataclasses)
-├── daemon.py           # Main daemon: hotkey → audio → VAD → engine → typer
+├── daemon.py           # Main daemon: hotkey → audio → VAD → engine → typer (batch + streaming)
 ├── audio.py            # Audio capture via sounddevice, WAV conversion
 ├── vad.py              # Silero VAD speech detection (ONNX, no PyTorch required)
 ├── typer.py            # Platform-aware text input (clipboard + paste)
@@ -31,7 +31,8 @@ src/whisper_dictation/
 - **Engine factory**: `create_engine()` in `engine/__init__.py` centralizes engine instantiation. `TranscriptionEngine` ABC allows swapping server/local backends transparently.
 - **Silero VAD over RMS energy**: Silero is ML-based, far more accurate for speech detection.
 - **ONNX by default**: VAD uses ONNX Runtime, not PyTorch, to keep the dependency footprint small.
-- **pynput + evdev**: pynput handles macOS/Windows/X11; evdev handles Linux Wayland where pynput fails.
+- **pynput + evdev**: pynput handles macOS/Windows/X11; evdev handles Linux Wayland where pynput fails. Callbacks fire outside the hotkey lock to prevent deadlocks.
+- **Non-blocking notifications**: `subprocess.Popen` (not `.run`) for Linux/macOS so notifications never block the daemon.
 - **No shell scripts**: Everything is Python. The legacy `scripts/` directory is from the pre-rewrite era.
 
 ## Security Considerations
@@ -83,7 +84,7 @@ GitHub Actions runs on every push/PR to main:
 - Python 3.10, 3.11, 3.12, 3.13, 3.14 matrix
 - Lint with ruff
 - Tests with coverage gate (minimum 80%)
-- 306 tests, 100% coverage
+- 307 tests, 100% coverage
 
 ## Config Priority (highest to lowest)
 

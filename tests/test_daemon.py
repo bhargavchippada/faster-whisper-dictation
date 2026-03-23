@@ -348,7 +348,7 @@ class TestOnDeactivate:
         daemon._on_deactivate()
 
         mock_thread.assert_not_called()
-        mock_notify.assert_any_call("No speech", "No audio recorded")
+        mock_notify.assert_any_call("Stopped", "No audio recorded")
 
 
 # ---------------------------------------------------------------------------

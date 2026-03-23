@@ -104,6 +104,7 @@ class DictationDaemon:
             self._audio.start()
         except Exception:
             log.error("Failed to start audio capture", exc_info=True)
+            self._audio.stop()
             self._audio = None
             with self._lock:
                 self._recording = False
@@ -145,10 +146,7 @@ class DictationDaemon:
                 daemon=True,
             ).start()
         else:
-            notify("No speech", "No audio recorded")
-
-        if self.config.hotkey.mode == "toggle":
-            notify("Stopped", "Dictation paused")
+            notify("Stopped", "No audio recorded")
 
     def start(self) -> None:
         """Start the dictation daemon."""
