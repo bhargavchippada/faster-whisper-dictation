@@ -585,7 +585,10 @@ class TestWebSocketEngineSenderLoopEdgeCases:
 
         engine._sender_loop()  # should exit on ws=None check
 
-    def test_sender_handles_empty_queue_timeout(self):
+    def test_sender_handles_empty_queue_then_stops(self):
+        """Sender loop: empty queue triggers continue, then stop_event exits."""
+        import threading
+
         engine = WebSocketEngine(
             server_url="http://localhost:10300",
             model="tiny",
@@ -593,10 +596,17 @@ class TestWebSocketEngineSenderLoopEdgeCases:
             on_text=MagicMock(),
         )
         engine._ws = MagicMock()
-        # Stop after one empty-queue iteration
-        engine._stop_event.set()
 
-        engine._sender_loop()  # should exit via stop_event after queue.Empty
+        # Set stop_event after a short delay so the loop runs at least once with empty queue
+        def delayed_stop():
+            import time
+            time.sleep(0.15)
+            engine._stop_event.set()
+
+        t = threading.Thread(target=delayed_stop, daemon=True)
+        t.start()
+        engine._sender_loop()  # runs, hits queue.Empty, continues, then stop_event exits
+        t.join(timeout=1.0)
 
 
 class TestWebSocketEngineWaitForCompletion:
@@ -663,3 +673,47 @@ class TestWebSocketEngineCloseEdgeCases:
             engine._send_queue.put_nowait("filler")
 
         engine.flush()  # should not raise
+
+    def test_close_warns_on_stuck_threads(self):
+        """Close logs warnings when threads don't exit within timeout."""
+        import threading
+
+        engine = WebSocketEngine(
+            server_url="http://localhost:10300",
+            model="tiny",
+            language="en",
+            on_text=MagicMock(),
+        )
+        # Create mock threads that report as still alive after join
+        mock_sender = MagicMock(spec=threading.Thread)
+        mock_sender.is_alive.return_value = True
+        mock_receiver = MagicMock(spec=threading.Thread)
+        mock_receiver.is_alive.return_value = True
+
+        engine._sender_thread = mock_sender
+        engine._receiver_thread = mock_receiver
+
+        engine.close()
+
+        mock_sender.join.assert_called_once_with(timeout=2.0)
+        mock_receiver.join.assert_called_once_with(timeout=2.0)
+
+    def test_close_drain_handles_concurrent_empty(self):
+        """Queue drain handles race where queue empties between empty() and get_nowait()."""
+        import queue as queue_mod
+
+        engine = WebSocketEngine(
+            server_url="http://localhost:10300",
+            model="tiny",
+            language="en",
+            on_text=MagicMock(),
+        )
+        # Mock queue that says not empty but raises Empty on get
+        mock_queue = MagicMock(spec=queue_mod.Queue)
+        empty_calls = [False, True]  # first call: not empty, second: empty
+        mock_queue.empty.side_effect = lambda: empty_calls.pop(0) if empty_calls else True
+        mock_queue.get_nowait.side_effect = queue_mod.Empty
+        mock_queue.put_nowait = MagicMock()
+        engine._send_queue = mock_queue
+
+        engine.close()  # should not raise
