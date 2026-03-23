@@ -156,6 +156,7 @@ class SpeechDetector:
         self.min_speech_chunks = min_speech_ms // 32
         self.max_speech_chunks = int(max_speech_s * 1000 / 32)
         self.chunk_size = sample_rate * 32 // 1000  # 512 samples at 16kHz
+        self._lock = threading.Lock()
 
         self._is_speaking = False
         self._silence_count = 0
@@ -170,17 +171,18 @@ class SpeechDetector:
             self._model_loaded = True
 
     def reset(self) -> None:
-        """Reset detector state for a new session."""
-        self._is_speaking = False
-        self._silence_count = 0
-        self._speech_count = 0
-        self._speech_frames.clear()
-        self._buffer = np.array([], dtype=np.float32)
-        if _model is not None and hasattr(_model, "reset_states"):
-            _model.reset_states()
+        """Reset detector state for a new session. Thread-safe."""
+        with self._lock:
+            self._is_speaking = False
+            self._silence_count = 0
+            self._speech_count = 0
+            self._speech_frames.clear()
+            self._buffer = np.array([], dtype=np.float32)
+            if _model is not None and hasattr(_model, "reset_states"):
+                _model.reset_states()
 
     def process_chunk(self, audio: np.ndarray) -> tuple[bool, np.ndarray | None]:
-        """Process an audio chunk.
+        """Process an audio chunk. Thread-safe.
 
         Returns:
             (utterance_complete, audio_data)
@@ -188,6 +190,13 @@ class SpeechDetector:
             - Otherwise audio_data is None.
         """
         self._ensure_model()
+        return self._process_chunk_locked(audio)
+
+    def _process_chunk_locked(self, audio: np.ndarray) -> tuple[bool, np.ndarray | None]:
+        with self._lock:
+            return self._process_chunk_impl(audio)
+
+    def _process_chunk_impl(self, audio: np.ndarray) -> tuple[bool, np.ndarray | None]:
 
         # Convert int16 to float32
         if audio.dtype == np.int16:
@@ -254,22 +263,23 @@ class SpeechDetector:
         return (completed_utterance is not None, completed_utterance)
 
     def flush(self) -> np.ndarray | None:
-        """Flush any buffered speech frames and return them.
+        """Flush any buffered speech frames and return them. Thread-safe.
 
         Returns the concatenated audio if there are enough speech frames,
         otherwise None. Resets internal state afterward.
         """
-        if not self._is_speaking or not self._speech_frames:
-            return None
+        with self._lock:
+            if not self._is_speaking or not self._speech_frames:
+                return None
 
-        audio = np.concatenate(self._speech_frames)
-        has_enough = self._speech_count >= self.min_speech_chunks
-        self._speech_frames.clear()
-        self._is_speaking = False
-        self._silence_count = 0
-        self._speech_count = 0
+            audio = np.concatenate(self._speech_frames)
+            has_enough = self._speech_count >= self.min_speech_chunks
+            self._speech_frames.clear()
+            self._is_speaking = False
+            self._silence_count = 0
+            self._speech_count = 0
 
-        return audio if has_enough else None
+            return audio if has_enough else None
 
     @property
     def is_speaking(self) -> bool:

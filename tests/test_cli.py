@@ -91,6 +91,18 @@ class TestPidManagement:
             result = _read_pid()
         assert result is None
 
+    def test_read_pid_permission_error_means_alive(self, tmp_path):
+        """PermissionError from os.kill means the process IS alive (different user)."""
+        pid_file = tmp_path / "daemon.pid"
+        pid_file.write_text("12345")
+        with (
+            patch("whisper_dictation.cli.PID_FILE", pid_file),
+            patch("os.kill", side_effect=PermissionError("not owner")),
+        ):
+            result = _read_pid()
+        assert result == 12345
+        assert pid_file.exists()  # PID file should NOT be deleted
+
     def test_cleanup_pid(self, tmp_path):
         pid_file = tmp_path / "daemon.pid"
         state_file = tmp_path / "state.json"
@@ -571,74 +583,63 @@ class TestCmdStart:
 # ---------------------------------------------------------------------------
 
 
-class TestCmdTranscribe:
-    def test_no_file_or_record(self, tmp_path):
-        args = MagicMock()
-        args.config = None
-        args.server_url = None
-        args.engine = None
-        args.file = None
-        args.record = None
+def _make_silent_wav(tmp_path):
+    """Create a silent WAV file for testing, return its path."""
+    import wave
 
+    import numpy as np
+
+    wav_path = tmp_path / "test.wav"
+    audio = np.zeros(16000, dtype=np.int16)
+    with wave.open(str(wav_path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        w.writeframes(audio.tobytes())
+    return wav_path
+
+
+def _make_transcribe_args(*, file=None, record=None, engine=None, server_url=None):
+    """Build a mock args namespace for cmd_transcribe."""
+    args = MagicMock()
+    args.config = None
+    args.server_url = server_url
+    args.engine = engine
+    args.file = file
+    args.record = record
+    return args
+
+
+class TestCmdTranscribe:
+    def test_no_file_or_record(self):
         with pytest.raises(SystemExit):
-            cmd_transcribe(args)
+            cmd_transcribe(_make_transcribe_args())
 
     def test_transcribe_file_not_found(self, tmp_path):
-        args = MagicMock()
-        args.config = None
-        args.server_url = None
-        args.engine = None
-        args.file = str(tmp_path / "nonexistent.wav")
-        args.record = None
-
+        args = _make_transcribe_args(file=str(tmp_path / "nonexistent.wav"))
         with pytest.raises(SystemExit):
             cmd_transcribe(args)
 
-    def test_transcribe_record_invalid_duration(self, tmp_path):
-        args = MagicMock()
-        args.config = None
-        args.server_url = None
-        args.engine = None
-        args.file = None
-        args.record = -1.0
-
+    def test_transcribe_record_invalid_duration(self):
+        args = _make_transcribe_args(record=-1.0)
         with pytest.raises(SystemExit):
             cmd_transcribe(args)
 
     def test_transcribe_file(self, tmp_path):
-        import wave
-
-        import numpy as np
-
         from whisper_dictation.config import Config
 
-        # Create a test WAV file
-        wav_path = tmp_path / "test.wav"
-        audio = np.zeros(16000, dtype=np.int16)
-        with wave.open(str(wav_path), "wb") as w:
-            w.setnchannels(1)
-            w.setsampwidth(2)
-            w.setframerate(16000)
-            w.writeframes(audio.tobytes())
-
+        wav_path = _make_silent_wav(tmp_path)
         mock_engine = MagicMock()
         mock_engine.transcribe.return_value = "hello"
-
-        args = MagicMock()
-        args.config = None
-        args.server_url = None
-        args.engine = None
-        args.file = str(wav_path)
-        args.record = None
 
         with (
             patch("whisper_dictation.cli.load_config", return_value=Config()),
             patch("whisper_dictation.engine.create_engine", return_value=mock_engine),
         ):
-            cmd_transcribe(args)
+            cmd_transcribe(_make_transcribe_args(file=str(wav_path)))
         mock_engine.transcribe.assert_called_once()
 
-    def test_transcribe_with_record(self, tmp_path, capsys):
+    def test_transcribe_with_record(self, capsys):
         import numpy as np
 
         from whisper_dictation.config import Config
@@ -647,27 +648,19 @@ class TestCmdTranscribe:
         mock_engine.transcribe.return_value = "recorded speech"
 
         mock_sd = MagicMock()
-        mock_audio = np.zeros((16000, 1), dtype=np.float32)
-        mock_sd.rec.return_value = mock_audio
-
-        args = MagicMock()
-        args.config = None
-        args.server_url = None
-        args.engine = None
-        args.file = None
-        args.record = 1.0
+        mock_sd.rec.return_value = np.zeros((16000, 1), dtype=np.float32)
 
         with (
             patch("whisper_dictation.cli.load_config", return_value=Config()),
             patch("whisper_dictation.engine.create_engine", return_value=mock_engine),
             patch.dict("sys.modules", {"sounddevice": mock_sd}),
         ):
-            cmd_transcribe(args)
+            cmd_transcribe(_make_transcribe_args(record=1.0))
 
         captured = capsys.readouterr()
         assert "recorded speech" in captured.out
 
-    def test_transcribe_record_no_speech(self, tmp_path):
+    def test_transcribe_record_no_speech(self):
         import numpy as np
 
         from whisper_dictation.config import Config
@@ -676,15 +669,7 @@ class TestCmdTranscribe:
         mock_engine.transcribe.return_value = ""
 
         mock_sd = MagicMock()
-        mock_audio = np.zeros((16000, 1), dtype=np.float32)
-        mock_sd.rec.return_value = mock_audio
-
-        args = MagicMock()
-        args.config = None
-        args.server_url = None
-        args.engine = None
-        args.file = None
-        args.record = 1.0
+        mock_sd.rec.return_value = np.zeros((16000, 1), dtype=np.float32)
 
         with (
             patch("whisper_dictation.cli.load_config", return_value=Config()),
@@ -692,32 +677,14 @@ class TestCmdTranscribe:
             patch.dict("sys.modules", {"sounddevice": mock_sd}),
             pytest.raises(SystemExit),
         ):
-            cmd_transcribe(args)
+            cmd_transcribe(_make_transcribe_args(record=1.0))
 
     def test_transcribe_with_server_url_override(self, tmp_path):
-        import wave
-
-        import numpy as np
-
         from whisper_dictation.config import Config
 
-        wav_path = tmp_path / "test.wav"
-        audio = np.zeros(16000, dtype=np.int16)
-        with wave.open(str(wav_path), "wb") as w:
-            w.setnchannels(1)
-            w.setsampwidth(2)
-            w.setframerate(16000)
-            w.writeframes(audio.tobytes())
-
+        wav_path = _make_silent_wav(tmp_path)
         mock_engine = MagicMock()
         mock_engine.transcribe.return_value = "hello"
-
-        args = MagicMock()
-        args.config = None
-        args.server_url = "http://custom:9000"
-        args.engine = None
-        args.file = str(wav_path)
-        args.record = None
 
         with (
             patch("whisper_dictation.cli.load_config", return_value=Config()),
@@ -725,74 +692,39 @@ class TestCmdTranscribe:
                 "whisper_dictation.engine.create_engine", return_value=mock_engine
             ) as mock_create,
         ):
-            cmd_transcribe(args)
-        # Verify server URL was overridden in the config passed to create_engine
+            cmd_transcribe(
+                _make_transcribe_args(file=str(wav_path), server_url="http://custom:9000")
+            )
         call_config = mock_create.call_args[0][0]
         assert call_config.server.url == "http://custom:9000"
 
     def test_transcribe_with_engine_override(self, tmp_path):
-        import wave
-
-        import numpy as np
-
         from whisper_dictation.config import Config
 
-        wav_path = tmp_path / "test.wav"
-        audio = np.zeros(16000, dtype=np.int16)
-        with wave.open(str(wav_path), "wb") as w:
-            w.setnchannels(1)
-            w.setsampwidth(2)
-            w.setframerate(16000)
-            w.writeframes(audio.tobytes())
-
+        wav_path = _make_silent_wav(tmp_path)
         mock_engine = MagicMock()
         mock_engine.transcribe.return_value = "hello"
-
-        args = MagicMock()
-        args.config = None
-        args.server_url = None
-        args.engine = "local"
-        args.file = str(wav_path)
-        args.record = None
 
         with (
             patch("whisper_dictation.cli.load_config", return_value=Config()),
             patch("whisper_dictation.engine.create_engine", return_value=mock_engine),
         ):
-            cmd_transcribe(args)
+            cmd_transcribe(_make_transcribe_args(file=str(wav_path), engine="local"))
         mock_engine.transcribe.assert_called_once()
 
     def test_transcribe_file_no_speech(self, tmp_path):
-        import wave
-
-        import numpy as np
-
         from whisper_dictation.config import Config
 
-        wav_path = tmp_path / "test.wav"
-        audio = np.zeros(16000, dtype=np.int16)
-        with wave.open(str(wav_path), "wb") as w:
-            w.setnchannels(1)
-            w.setsampwidth(2)
-            w.setframerate(16000)
-            w.writeframes(audio.tobytes())
-
+        wav_path = _make_silent_wav(tmp_path)
         mock_engine = MagicMock()
         mock_engine.transcribe.return_value = ""
-
-        args = MagicMock()
-        args.config = None
-        args.server_url = None
-        args.engine = None
-        args.file = str(wav_path)
-        args.record = None
 
         with (
             patch("whisper_dictation.cli.load_config", return_value=Config()),
             patch("whisper_dictation.engine.create_engine", return_value=mock_engine),
             pytest.raises(SystemExit),
         ):
-            cmd_transcribe(args)
+            cmd_transcribe(_make_transcribe_args(file=str(wav_path)))
 
 
 # ---------------------------------------------------------------------------

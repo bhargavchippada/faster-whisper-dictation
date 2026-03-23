@@ -245,25 +245,6 @@ class TestOnDeactivate:
     @patch("whisper_dictation.daemon.threading.Thread")
     @patch("whisper_dictation.daemon.notify")
     @patch("whisper_dictation.daemon.create_engine")
-    def test_deactivate_flushes_remaining_speech(self, mock_create, mock_notify, mock_thread):
-        mock_create.return_value = MagicMock()
-        daemon = DictationDaemon(Config())
-        daemon._recording = True
-        daemon._audio = MagicMock()
-
-        # Mock VAD flush to return audio
-        remaining_audio = np.ones(16000, dtype=np.float32)
-        daemon._vad = MagicMock()
-        daemon._vad.flush.return_value = remaining_audio
-
-        daemon._on_deactivate()
-
-        # Should have spawned a thread to transcribe remaining audio
-        mock_thread.assert_called()
-
-    @patch("whisper_dictation.daemon.threading.Thread")
-    @patch("whisper_dictation.daemon.notify")
-    @patch("whisper_dictation.daemon.create_engine")
     def test_deactivate_flushes_speech_via_vad_flush(self, mock_create, mock_notify, mock_thread):
         """Test _on_deactivate uses vad.flush() and spawns transcription thread."""
         mock_create.return_value = MagicMock()

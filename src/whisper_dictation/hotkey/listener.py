@@ -164,6 +164,7 @@ class HotkeyListener:
             "ctrl": {ecodes.KEY_LEFTCTRL, ecodes.KEY_RIGHTCTRL},
             "control": {ecodes.KEY_LEFTCTRL, ecodes.KEY_RIGHTCTRL},
             "shift": {ecodes.KEY_LEFTSHIFT, ecodes.KEY_RIGHTSHIFT},
+            "cmd": {ecodes.KEY_LEFTMETA, ecodes.KEY_RIGHTMETA},
             "super": {ecodes.KEY_LEFTMETA, ecodes.KEY_RIGHTMETA},
             "meta": {ecodes.KEY_LEFTMETA, ecodes.KEY_RIGHTMETA},
         }
@@ -258,6 +259,9 @@ class HotkeyListener:
                     self.on_activate()
 
     def _handle_release(self) -> None:
+        """Release handler — only meaningful in hold mode."""
+        if self.mode != "hold":
+            return
         with self._lock:
             if self._active:
                 self._active = False

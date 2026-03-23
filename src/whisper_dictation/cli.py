@@ -71,7 +71,11 @@ def _write_pid() -> None:
     try:
         import fcntl
 
-        fd = os.open(str(PID_FILE), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        fd = os.open(
+            str(PID_FILE),
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+        )
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
@@ -94,7 +98,9 @@ def _read_pid() -> int | None:
             pid = int(PID_FILE.read_text().strip())
             os.kill(pid, 0)
             return pid
-        except (ValueError, ProcessLookupError, PermissionError, FileNotFoundError):
+        except PermissionError:
+            return pid  # process exists but owned by another user
+        except (ValueError, ProcessLookupError, FileNotFoundError):
             PID_FILE.unlink(missing_ok=True)
     return None
 
@@ -136,12 +142,14 @@ def cmd_start(args: argparse.Namespace) -> None:
 
     # Write state for status command (restricted permissions for URL privacy)
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    state_data = json.dumps({
-        "mode": config.hotkey.mode,
-        "hotkey": config.hotkey.binding,
-        "engine": config.engine.type,
-        "server_url": config.server.url,
-    })
+    state_data = json.dumps(
+        {
+            "mode": config.hotkey.mode,
+            "hotkey": config.hotkey.binding,
+            "engine": config.engine.type,
+            "server_url": config.server.url,
+        }
+    )
     fd = os.open(str(STATE_FILE), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         os.write(fd, state_data.encode())
@@ -163,7 +171,6 @@ def cmd_start(args: argparse.Namespace) -> None:
         daemon.wait()
     except RuntimeError as e:
         print(f"Error: {e}", file=sys.stderr)
-        _cleanup_pid()
         sys.exit(1)
     finally:
         _cleanup_pid()

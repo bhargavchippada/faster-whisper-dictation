@@ -371,17 +371,13 @@ class TestLoadModelTorch:
         """Test _load_model when torch is available."""
         import whisper_dictation.vad as vad_mod
 
-        # Reset globals
         original_model = vad_mod._model
-        # _get_speech_timestamps removed in refactor
         vad_mod._model = None
-        # _get_speech_timestamps removed
 
         try:
             mock_model = MagicMock()
-            mock_get_timestamps = MagicMock()
             mock_torch = MagicMock()
-            mock_torch.hub.load.return_value = (mock_model, [mock_get_timestamps, None, None])
+            mock_torch.hub.load.return_value = (mock_model, [MagicMock(), None, None])
 
             with patch.dict("sys.modules", {"torch": mock_torch}):
                 with patch(
@@ -393,10 +389,9 @@ class TestLoadModelTorch:
                     vad_mod._load_model()
 
             assert vad_mod._model is mock_model
-            # _get_speech_timestamps removed in refactor
+
         finally:
             vad_mod._model = original_model
-            pass  # _get_speech_timestamps removed
 
     def test_load_model_already_loaded(self):
         """Test _load_model short-circuits when model is already loaded."""
@@ -416,9 +411,8 @@ class TestLoadModelTorch:
         import whisper_dictation.vad as vad_mod
 
         original_model = vad_mod._model
-        # _get_speech_timestamps removed in refactor
+
         vad_mod._model = None
-        # _get_speech_timestamps removed
 
         try:
             with patch("whisper_dictation.vad._load_onnx_model") as mock_onnx:
@@ -438,7 +432,6 @@ class TestLoadModelTorch:
                 mock_onnx.assert_called_once()
         finally:
             vad_mod._model = original_model
-            pass  # _get_speech_timestamps removed
 
 
 # ---------------------------------------------------------------------------
@@ -456,6 +449,7 @@ class TestLoadOnnxModel:
 
         def fake_urlretrieve(url, path):
             from pathlib import Path
+
             Path(path).write_bytes(b"custom model")
 
         try:
@@ -464,7 +458,9 @@ class TestLoadOnnxModel:
                 patch("platformdirs.user_cache_dir", return_value=str(tmp_path)),
                 patch("urllib.request.urlretrieve", side_effect=fake_urlretrieve),
                 patch("whisper_dictation.vad._verify_model_hash") as mock_verify,
-                patch.dict("os.environ", {"DICTATION_VAD_MODEL_URL": "https://example.com/model.onnx"}),
+                patch.dict(
+                    "os.environ", {"DICTATION_VAD_MODEL_URL": "https://example.com/model.onnx"}
+                ),
                 patch.dict("sys.modules", {"onnxruntime": MagicMock()}),
             ):
                 vad_mod._load_onnx_model()
@@ -738,6 +734,7 @@ class TestLoadOnnxModelCustomUrl:
         vad_mod._model = None
 
         try:
+
             def fake_download(url, path):
                 Path(path).write_bytes(b"fake")
 

@@ -107,12 +107,13 @@ class TestToggleMode:
         assert deactivate.call_count == 1
 
     def test_release_ignored_in_toggle_mode(self, toggle_listener):
+        """_handle_release is a no-op in toggle mode."""
         listener, activate, deactivate = toggle_listener
         listener._handle_press()
         listener._handle_release()
-        # In toggle mode, release deactivates if active
-        assert listener._active is False
-        deactivate.assert_called_once()
+        # In toggle mode, release should NOT deactivate — only a second press does
+        assert listener._active is True
+        deactivate.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -258,15 +259,47 @@ class TestStartStop:
 
 
 class TestStartPynput:
+    @staticmethod
+    def _make_mock_keyboard():
+        """Create a mock pynput keyboard module with all Key attributes."""
+        kb = MagicMock()
+        for attr in (
+            "alt",
+            "alt_l",
+            "alt_r",
+            "alt_gr",
+            "ctrl",
+            "ctrl_l",
+            "ctrl_r",
+            "shift",
+            "shift_l",
+            "shift_r",
+            "cmd",
+            "cmd_l",
+            "cmd_r",
+        ):
+            setattr(kb.Key, attr, MagicMock(name=f"Key.{attr}"))
+        kb.Listener.return_value = MagicMock()
+        return kb
+
+    def _start_with_mock(self, listener, mock_keyboard):
+        """Start pynput listener with mock keyboard, return (on_press, on_release)."""
+        with patch.dict(
+            "sys.modules",
+            {"pynput": MagicMock(keyboard=mock_keyboard), "pynput.keyboard": mock_keyboard},
+        ):
+            listener._start_pynput()
+        cbs = mock_keyboard.Listener.call_args[1]
+        return cbs["on_press"], cbs["on_release"]
+
     def test_start_pynput_creates_listener(self):
         """Test _start_pynput creates and starts a pynput Listener."""
         activate = MagicMock()
         deactivate = MagicMock()
         listener = HotkeyListener("alt+v", "toggle", activate, deactivate)
 
-        mock_keyboard = MagicMock()
-        mock_pynput_listener = MagicMock()
-        mock_keyboard.Listener.return_value = mock_pynput_listener
+        mock_keyboard = self._make_mock_keyboard()
+        mock_pynput_listener = mock_keyboard.Listener.return_value
 
         mock_pynput = MagicMock()
         mock_pynput.keyboard = mock_keyboard
@@ -281,82 +314,26 @@ class TestStartPynput:
     def test_pynput_on_press_with_matching_hotkey_toggle(self):
         """Test pynput on_press callback fires _handle_press for matching hotkey."""
         activate = MagicMock()
-        deactivate = MagicMock()
-        listener = HotkeyListener("alt+v", "toggle", activate, deactivate)
+        listener = HotkeyListener("alt+v", "toggle", activate, MagicMock())
 
-        mock_keyboard = MagicMock()
-        # Create mock keys
-        mock_alt_key = MagicMock()
-        mock_keyboard.Key.alt = mock_alt_key
-        mock_keyboard.Key.alt_l = MagicMock()
-        mock_keyboard.Key.alt_r = MagicMock()
-        mock_keyboard.Key.alt_gr = MagicMock()
-        mock_keyboard.Key.ctrl = MagicMock()
-        mock_keyboard.Key.ctrl_l = MagicMock()
-        mock_keyboard.Key.ctrl_r = MagicMock()
-        mock_keyboard.Key.shift = MagicMock()
-        mock_keyboard.Key.shift_l = MagicMock()
-        mock_keyboard.Key.shift_r = MagicMock()
-        mock_keyboard.Key.cmd = MagicMock()
-        mock_keyboard.Key.cmd_l = MagicMock()
-        mock_keyboard.Key.cmd_r = MagicMock()
+        mock_keyboard = self._make_mock_keyboard()
+        on_press, _ = self._start_with_mock(listener, mock_keyboard)
 
-        mock_pynput_listener = MagicMock()
-        mock_keyboard.Listener.return_value = mock_pynput_listener
-
-        mock_pynput = MagicMock()
-        mock_pynput.keyboard = mock_keyboard
-
-        with patch.dict("sys.modules", {"pynput": mock_pynput, "pynput.keyboard": mock_keyboard}):
-            listener._start_pynput()
-
-        # Get the on_press and on_release callbacks
-        call_kwargs = mock_keyboard.Listener.call_args[1]
-        on_press = call_kwargs["on_press"]
-        call_kwargs["on_release"]
-
-        # Simulate pressing alt
-        on_press(mock_alt_key)
-
-        # Simulate pressing 'v' while alt is held
+        # Simulate pressing alt, then 'v'
+        on_press(mock_keyboard.Key.alt)
         mock_v_key = MagicMock()
         mock_v_key.char = "v"
         on_press(mock_v_key)
 
-        # Should have activated in toggle mode
         activate.assert_called_once()
 
     def test_pynput_on_press_no_modifier_no_activation(self):
         """Test pynput on_press does not fire when modifier not held."""
         activate = MagicMock()
-        deactivate = MagicMock()
-        listener = HotkeyListener("alt+v", "toggle", activate, deactivate)
+        listener = HotkeyListener("alt+v", "toggle", activate, MagicMock())
 
-        mock_keyboard = MagicMock()
-        mock_keyboard.Key.alt = MagicMock()
-        mock_keyboard.Key.alt_l = MagicMock()
-        mock_keyboard.Key.alt_r = MagicMock()
-        mock_keyboard.Key.alt_gr = MagicMock()
-        mock_keyboard.Key.ctrl = MagicMock()
-        mock_keyboard.Key.ctrl_l = MagicMock()
-        mock_keyboard.Key.ctrl_r = MagicMock()
-        mock_keyboard.Key.shift = MagicMock()
-        mock_keyboard.Key.shift_l = MagicMock()
-        mock_keyboard.Key.shift_r = MagicMock()
-        mock_keyboard.Key.cmd = MagicMock()
-        mock_keyboard.Key.cmd_l = MagicMock()
-        mock_keyboard.Key.cmd_r = MagicMock()
-
-        mock_pynput_listener = MagicMock()
-        mock_keyboard.Listener.return_value = mock_pynput_listener
-
-        with patch.dict(
-            "sys.modules",
-            {"pynput": MagicMock(keyboard=mock_keyboard), "pynput.keyboard": mock_keyboard},
-        ):
-            listener._start_pynput()
-
-        on_press = mock_keyboard.Listener.call_args[1]["on_press"]
+        mock_keyboard = self._make_mock_keyboard()
+        on_press, _ = self._start_with_mock(listener, mock_keyboard)
 
         # Press 'v' without holding alt
         mock_v_key = MagicMock()
@@ -371,37 +348,11 @@ class TestStartPynput:
         deactivate = MagicMock()
         listener = HotkeyListener("alt+v", "hold", activate, deactivate)
 
-        mock_keyboard = MagicMock()
-        mock_alt_key = MagicMock()
-        mock_keyboard.Key.alt = mock_alt_key
-        mock_keyboard.Key.alt_l = MagicMock()
-        mock_keyboard.Key.alt_r = MagicMock()
-        mock_keyboard.Key.alt_gr = MagicMock()
-        mock_keyboard.Key.ctrl = MagicMock()
-        mock_keyboard.Key.ctrl_l = MagicMock()
-        mock_keyboard.Key.ctrl_r = MagicMock()
-        mock_keyboard.Key.shift = MagicMock()
-        mock_keyboard.Key.shift_l = MagicMock()
-        mock_keyboard.Key.shift_r = MagicMock()
-        mock_keyboard.Key.cmd = MagicMock()
-        mock_keyboard.Key.cmd_l = MagicMock()
-        mock_keyboard.Key.cmd_r = MagicMock()
-
-        mock_pynput_listener = MagicMock()
-        mock_keyboard.Listener.return_value = mock_pynput_listener
-
-        with patch.dict(
-            "sys.modules",
-            {"pynput": MagicMock(keyboard=mock_keyboard), "pynput.keyboard": mock_keyboard},
-        ):
-            listener._start_pynput()
-
-        call_kwargs = mock_keyboard.Listener.call_args[1]
-        on_press = call_kwargs["on_press"]
-        on_release = call_kwargs["on_release"]
+        mock_keyboard = self._make_mock_keyboard()
+        on_press, on_release = self._start_with_mock(listener, mock_keyboard)
 
         # Press alt, then v to activate
-        on_press(mock_alt_key)
+        on_press(mock_keyboard.Key.alt)
         mock_v_key = MagicMock()
         mock_v_key.char = "v"
         mock_v_key.name = "v"
@@ -418,126 +369,48 @@ class TestStartPynput:
         deactivate = MagicMock()
         listener = HotkeyListener("alt+v", "hold", activate, deactivate)
 
-        mock_keyboard = MagicMock()
-        mock_alt_key = MagicMock()
-        mock_keyboard.Key.alt = mock_alt_key
-        mock_keyboard.Key.alt_l = MagicMock()
-        mock_keyboard.Key.alt_r = MagicMock()
-        mock_keyboard.Key.alt_gr = MagicMock()
-        mock_keyboard.Key.ctrl = MagicMock()
-        mock_keyboard.Key.ctrl_l = MagicMock()
-        mock_keyboard.Key.ctrl_r = MagicMock()
-        mock_keyboard.Key.shift = MagicMock()
-        mock_keyboard.Key.shift_l = MagicMock()
-        mock_keyboard.Key.shift_r = MagicMock()
-        mock_keyboard.Key.cmd = MagicMock()
-        mock_keyboard.Key.cmd_l = MagicMock()
-        mock_keyboard.Key.cmd_r = MagicMock()
-
-        mock_pynput_listener = MagicMock()
-        mock_keyboard.Listener.return_value = mock_pynput_listener
-
-        with patch.dict(
-            "sys.modules",
-            {"pynput": MagicMock(keyboard=mock_keyboard), "pynput.keyboard": mock_keyboard},
-        ):
-            listener._start_pynput()
-
-        call_kwargs = mock_keyboard.Listener.call_args[1]
-        on_press = call_kwargs["on_press"]
-        on_release = call_kwargs["on_release"]
+        mock_keyboard = self._make_mock_keyboard()
+        on_press, on_release = self._start_with_mock(listener, mock_keyboard)
 
         # Press alt, then v to activate
-        on_press(mock_alt_key)
+        on_press(mock_keyboard.Key.alt)
         mock_v_key = MagicMock()
         mock_v_key.char = "v"
         on_press(mock_v_key)
         activate.assert_called_once()
 
         # Release alt -> should deactivate since modifier no longer held
-        on_release(mock_alt_key)
+        on_release(mock_keyboard.Key.alt)
         deactivate.assert_called_once()
 
     def test_pynput_key_name_for_special_key(self):
         """Test _key_name handles keys with .name attribute (no .char)."""
         activate = MagicMock()
-        deactivate = MagicMock()
-        listener = HotkeyListener("alt+f1", "toggle", activate, deactivate)
+        listener = HotkeyListener("alt+f1", "toggle", activate, MagicMock())
 
-        mock_keyboard = MagicMock()
-        mock_alt_key = MagicMock()
-        mock_keyboard.Key.alt = mock_alt_key
-        mock_keyboard.Key.alt_l = MagicMock()
-        mock_keyboard.Key.alt_r = MagicMock()
-        mock_keyboard.Key.alt_gr = MagicMock()
-        mock_keyboard.Key.ctrl = MagicMock()
-        mock_keyboard.Key.ctrl_l = MagicMock()
-        mock_keyboard.Key.ctrl_r = MagicMock()
-        mock_keyboard.Key.shift = MagicMock()
-        mock_keyboard.Key.shift_l = MagicMock()
-        mock_keyboard.Key.shift_r = MagicMock()
-        mock_keyboard.Key.cmd = MagicMock()
-        mock_keyboard.Key.cmd_l = MagicMock()
-        mock_keyboard.Key.cmd_r = MagicMock()
-
-        mock_pynput_listener = MagicMock()
-        mock_keyboard.Listener.return_value = mock_pynput_listener
-
-        with patch.dict(
-            "sys.modules",
-            {"pynput": MagicMock(keyboard=mock_keyboard), "pynput.keyboard": mock_keyboard},
-        ):
-            listener._start_pynput()
-
-        on_press = mock_keyboard.Listener.call_args[1]["on_press"]
+        mock_keyboard = self._make_mock_keyboard()
+        on_press, _ = self._start_with_mock(listener, mock_keyboard)
 
         # Press alt
-        on_press(mock_alt_key)
+        on_press(mock_keyboard.Key.alt)
 
         # Press a key with .name but no .char (like F1)
         mock_f1_key = MagicMock(spec=[])
         mock_f1_key.name = "f1"
-        # Ensure hasattr(key, 'char') is False
         on_press(mock_f1_key)
         activate.assert_called_once()
 
     def test_pynput_key_name_fallback_to_str(self):
         """Test _key_name falls back to str(key) when no char or name."""
         activate = MagicMock()
-        deactivate = MagicMock()
-        listener = HotkeyListener("alt+v", "toggle", activate, deactivate)
+        listener = HotkeyListener("alt+v", "toggle", activate, MagicMock())
 
-        mock_keyboard = MagicMock()
-        mock_keyboard.Key.alt = MagicMock()
-        mock_keyboard.Key.alt_l = MagicMock()
-        mock_keyboard.Key.alt_r = MagicMock()
-        mock_keyboard.Key.alt_gr = MagicMock()
-        mock_keyboard.Key.ctrl = MagicMock()
-        mock_keyboard.Key.ctrl_l = MagicMock()
-        mock_keyboard.Key.ctrl_r = MagicMock()
-        mock_keyboard.Key.shift = MagicMock()
-        mock_keyboard.Key.shift_l = MagicMock()
-        mock_keyboard.Key.shift_r = MagicMock()
-        mock_keyboard.Key.cmd = MagicMock()
-        mock_keyboard.Key.cmd_l = MagicMock()
-        mock_keyboard.Key.cmd_r = MagicMock()
-
-        mock_pynput_listener = MagicMock()
-        mock_keyboard.Listener.return_value = mock_pynput_listener
-
-        with patch.dict(
-            "sys.modules",
-            {"pynput": MagicMock(keyboard=mock_keyboard), "pynput.keyboard": mock_keyboard},
-        ):
-            listener._start_pynput()
-
-        on_press = mock_keyboard.Listener.call_args[1]["on_press"]
+        mock_keyboard = self._make_mock_keyboard()
+        on_press, _ = self._start_with_mock(listener, mock_keyboard)
 
         # A key with char=None and no name attribute — falls back to str
         mock_weird_key = MagicMock(spec=[])
-        # spec=[] means no attributes
         on_press(mock_weird_key)
-        # Just ensure no crash
         activate.assert_not_called()
 
 
