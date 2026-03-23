@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from whisper_dictation.notifier import notify
 
 
@@ -69,9 +67,12 @@ class TestNotifyWindows:
             with patch("whisper_dictation.notifier.sys", mock_sys):
                 # We need to ensure the import inside works
                 mock_notification = MagicMock()
-                with patch("builtins.__import__", side_effect=lambda name, *a, **kw: (
-                    mock_notification if "plyer" in str(name) else __import__(name, *a, **kw)
-                )):
+                with patch(
+                    "builtins.__import__",
+                    side_effect=lambda name, *a, **kw: (
+                        mock_notification if "plyer" in str(name) else __import__(name, *a, **kw)
+                    ),
+                ):
                     # Simpler approach: just call and verify no crash
                     notify("Win Title", "Win Body")
 
@@ -82,10 +83,13 @@ class TestNotifyWindows:
         mock_plyer_notification = MagicMock()
         mock_plyer_notification.notify.side_effect = RuntimeError("plyer crashed")
 
-        with patch.dict("sys.modules", {
-            "plyer": MagicMock(notification=mock_plyer_notification),
-            "plyer.notification": mock_plyer_notification,
-        }):
+        with patch.dict(
+            "sys.modules",
+            {
+                "plyer": MagicMock(notification=mock_plyer_notification),
+                "plyer.notification": mock_plyer_notification,
+            },
+        ):
             # Should not raise - exception should be caught
             notify("Win Title", "Win Body")
 

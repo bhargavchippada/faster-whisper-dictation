@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from whisper_dictation import typer
-
 
 # ---------------------------------------------------------------------------
 # type_text dispatch
@@ -261,6 +260,21 @@ class TestWinClipboardGet:
 
         assert result == ""
 
+    def test_returns_empty_when_clipboard_open_fails(self):
+        """Test _win_clipboard_get returns empty when OpenClipboard fails."""
+        mock_ctypes = MagicMock()
+        mock_user32 = MagicMock()
+        mock_ctypes.windll.user32 = mock_user32
+        mock_ctypes.windll.kernel32 = MagicMock()
+
+        mock_user32.OpenClipboard.return_value = 0  # failure
+
+        with patch.dict("sys.modules", {"ctypes": mock_ctypes, "ctypes.wintypes": MagicMock()}):
+            result = typer._win_clipboard_get()
+
+        assert result == ""
+        mock_user32.CloseClipboard.assert_not_called()
+
 
 class TestWinClipboardSet:
     def test_sets_clipboard_text(self):
@@ -281,6 +295,51 @@ class TestWinClipboardSet:
         mock_user32.CloseClipboard.assert_called_once()
         mock_kernel32.GlobalUnlock.assert_called_once()
         mock_ctypes.memmove.assert_called_once()
+
+    def test_frees_memory_when_clipboard_open_fails(self):
+        """Test _win_clipboard_set frees allocated memory when OpenClipboard fails."""
+        mock_ctypes = MagicMock()
+        mock_user32 = MagicMock()
+        mock_kernel32 = MagicMock()
+        mock_ctypes.windll.user32 = mock_user32
+        mock_ctypes.windll.kernel32 = mock_kernel32
+        mock_kernel32.GlobalAlloc.return_value = 99
+        mock_kernel32.GlobalLock.return_value = 100
+
+        mock_user32.OpenClipboard.return_value = 0  # failure
+
+        with patch.dict("sys.modules", {"ctypes": mock_ctypes, "ctypes.wintypes": MagicMock()}):
+            typer._win_clipboard_set("hello")
+
+        mock_kernel32.GlobalFree.assert_called_once_with(99)
+        mock_user32.EmptyClipboard.assert_not_called()
+        mock_user32.CloseClipboard.assert_not_called()
+
+
+    def test_global_alloc_failure_raises(self):
+        mock_ctypes = MagicMock()
+        mock_kernel32 = MagicMock()
+        mock_ctypes.windll.user32 = MagicMock()
+        mock_ctypes.windll.kernel32 = mock_kernel32
+        mock_kernel32.GlobalAlloc.return_value = 0  # failure
+
+        with patch.dict("sys.modules", {"ctypes": mock_ctypes, "ctypes.wintypes": MagicMock()}):
+            with pytest.raises(RuntimeError, match="GlobalAlloc failed"):
+                typer._win_clipboard_set("hello")
+
+    def test_global_lock_failure_frees_and_raises(self):
+        mock_ctypes = MagicMock()
+        mock_kernel32 = MagicMock()
+        mock_ctypes.windll.user32 = MagicMock()
+        mock_ctypes.windll.kernel32 = mock_kernel32
+        mock_kernel32.GlobalAlloc.return_value = 99
+        mock_kernel32.GlobalLock.return_value = 0  # failure
+
+        with patch.dict("sys.modules", {"ctypes": mock_ctypes, "ctypes.wintypes": MagicMock()}):
+            with pytest.raises(RuntimeError, match="GlobalLock failed"):
+                typer._win_clipboard_set("hello")
+
+        mock_kernel32.GlobalFree.assert_called_once_with(99)
 
 
 class TestSendCtrlV:
@@ -309,15 +368,43 @@ class TestPasteDelay:
         with patch.dict("os.environ", {}, clear=True):
             # Reimport to get default
             import importlib
+
             importlib.reload(typer)
             assert typer.PASTE_DELAY == 0.15
 
     def test_custom_paste_delay(self):
         with patch.dict("os.environ", {"DICTATION_PASTE_DELAY": "0.5"}):
             import importlib
+
             importlib.reload(typer)
             assert typer.PASTE_DELAY == 0.5
         # Reset
         with patch.dict("os.environ", {}, clear=True):
             import importlib
+
             importlib.reload(typer)
+
+
+class TestParsePasteDelay:
+    def test_valid_value(self):
+        assert typer._parse_paste_delay("0.15") == 0.15
+
+    def test_non_numeric_raises(self):
+        with pytest.raises(ValueError, match="must be a number"):
+            typer._parse_paste_delay("abc")
+
+    def test_nan_raises(self):
+        with pytest.raises(ValueError, match="must be 0.0-10.0"):
+            typer._parse_paste_delay("nan")
+
+    def test_negative_raises(self):
+        with pytest.raises(ValueError, match="must be 0.0-10.0"):
+            typer._parse_paste_delay("-1.0")
+
+    def test_too_large_raises(self):
+        with pytest.raises(ValueError, match="must be 0.0-10.0"):
+            typer._parse_paste_delay("99.0")
+
+    def test_inf_raises(self):
+        with pytest.raises(ValueError, match="must be 0.0-10.0"):
+            typer._parse_paste_delay("inf")

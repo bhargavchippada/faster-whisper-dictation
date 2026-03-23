@@ -383,9 +383,12 @@ class TestLoadModelTorch:
             mock_torch.hub.load.return_value = (mock_model, [mock_get_timestamps, None, None])
 
             with patch.dict("sys.modules", {"torch": mock_torch}):
-                with patch("builtins.__import__", side_effect=lambda name, *a, **kw: (
-                    mock_torch if name == "torch" else __import__(name, *a, **kw)
-                )):
+                with patch(
+                    "builtins.__import__",
+                    side_effect=lambda name, *a, **kw: (
+                        mock_torch if name == "torch" else __import__(name, *a, **kw)
+                    ),
+                ):
                     vad_mod._load_model()
 
             assert vad_mod._model is mock_model
@@ -419,7 +422,9 @@ class TestLoadModelTorch:
         try:
             with patch("whisper_dictation.vad._load_onnx_model") as mock_onnx:
                 # Make torch import raise ImportError
-                real_import = __builtins__.__import__ if hasattr(__builtins__, '__import__') else __import__
+                real_import = (
+                    __builtins__.__import__ if hasattr(__builtins__, "__import__") else __import__
+                )
 
                 def fake_import(name, *args, **kwargs):
                     if name == "torch":
@@ -448,19 +453,85 @@ class TestLoadOnnxModel:
         original_model = vad_mod._model
         vad_mod._model = None
 
+        def fake_urlretrieve(url, path):
+            """Create the temp file so atomic rename works."""
+            from pathlib import Path
+
+            Path(path).write_bytes(b"fake model data")
+
         try:
-            cache_path = tmp_path / "silero_vad.onnx"
             mock_ort = MagicMock()
 
             with (
                 patch("whisper_dictation.vad.OnnxVAD") as mock_onnx_vad,
                 patch("platformdirs.user_cache_dir", return_value=str(tmp_path)),
-                patch("urllib.request.urlretrieve") as mock_download,
+                patch("urllib.request.urlretrieve", side_effect=fake_urlretrieve) as mock_download,
+                patch("whisper_dictation.vad._verify_model_hash"),
                 patch.dict("sys.modules", {"onnxruntime": mock_ort}),
             ):
                 vad_mod._load_onnx_model()
                 mock_download.assert_called_once()
                 mock_onnx_vad.assert_called_once()
+        finally:
+            vad_mod._model = original_model
+
+    def test_load_onnx_model_cleans_up_on_hash_failure(self, tmp_path):
+        """Test _load_onnx_model removes temp file when hash verification fails."""
+        import whisper_dictation.vad as vad_mod
+
+        original_model = vad_mod._model
+        vad_mod._model = None
+
+        def fake_urlretrieve(url, path):
+            from pathlib import Path
+
+            Path(path).write_bytes(b"bad model data")
+
+        try:
+            with (
+                patch("platformdirs.user_cache_dir", return_value=str(tmp_path)),
+                patch("urllib.request.urlretrieve", side_effect=fake_urlretrieve),
+                patch(
+                    "whisper_dictation.vad._verify_model_hash",
+                    side_effect=RuntimeError("hash mismatch"),
+                ),
+            ):
+                with pytest.raises(RuntimeError, match="hash mismatch"):
+                    vad_mod._load_onnx_model()
+
+            # Temp file should be cleaned up
+            assert not (tmp_path / "silero_vad.tmp").exists()
+            # Cache file should not exist either
+            assert not (tmp_path / "silero_vad.onnx").exists()
+        finally:
+            vad_mod._model = original_model
+
+    def test_load_onnx_model_cleans_up_on_download_failure(self, tmp_path):
+        """Test _load_onnx_model removes .tmp file when download itself fails."""
+        import whisper_dictation.vad as vad_mod
+
+        original_model = vad_mod._model
+        vad_mod._model = None
+
+        tmp_file = tmp_path / "silero_vad.tmp"
+
+        def fake_urlretrieve(url, path):
+            from pathlib import Path
+            Path(path).write_bytes(b"partial")
+            raise ConnectionError("download interrupted")
+
+        try:
+            with (
+                patch("platformdirs.user_cache_dir", return_value=str(tmp_path)),
+                patch("urllib.request.urlretrieve", side_effect=fake_urlretrieve),
+            ):
+                with pytest.raises(ConnectionError, match="download interrupted"):
+                    vad_mod._load_onnx_model()
+
+            # .tmp file should be cleaned up
+            assert not tmp_file.exists()
+            # Cache file should not exist
+            assert not (tmp_path / "silero_vad.onnx").exists()
         finally:
             vad_mod._model = original_model
 
@@ -480,7 +551,7 @@ class TestLoadOnnxModel:
             mock_ort = MagicMock()
 
             with (
-                patch("whisper_dictation.vad.OnnxVAD") as mock_onnx_vad,
+                patch("whisper_dictation.vad.OnnxVAD"),
                 patch("platformdirs.user_cache_dir", return_value=str(cache_dir)),
                 patch("urllib.request.urlretrieve") as mock_download,
                 patch.dict("sys.modules", {"onnxruntime": mock_ort}),
@@ -489,6 +560,38 @@ class TestLoadOnnxModel:
                 mock_download.assert_not_called()
         finally:
             vad_mod._model = original_model
+
+
+# ---------------------------------------------------------------------------
+# _verify_model_hash
+# ---------------------------------------------------------------------------
+
+
+class TestVerifyModelHash:
+    def test_matching_hash_passes(self, tmp_path):
+        """Test _verify_model_hash succeeds when hash matches."""
+        from whisper_dictation.vad import _verify_model_hash
+
+        model_file = tmp_path / "model.onnx"
+        model_file.write_bytes(b"test data")
+
+        import hashlib
+
+        expected = hashlib.sha256(b"test data").hexdigest()
+        # Should not raise
+        _verify_model_hash(model_file, expected)
+
+    def test_mismatched_hash_raises_and_deletes(self, tmp_path):
+        """Test _verify_model_hash raises RuntimeError and deletes file on mismatch."""
+        from whisper_dictation.vad import _verify_model_hash
+
+        model_file = tmp_path / "model.onnx"
+        model_file.write_bytes(b"test data")
+
+        with pytest.raises(RuntimeError, match="Model integrity check failed"):
+            _verify_model_hash(model_file, "0" * 64)
+
+        assert not model_file.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -506,11 +609,15 @@ class TestOnnxVAD:
 
         with patch.dict("sys.modules", {"onnxruntime": mock_ort}):
             from whisper_dictation.vad import OnnxVAD
+
             vad = OnnxVAD.__new__(OnnxVAD)
             # Manually call __init__ with mocked ort
-            with patch("builtins.__import__", side_effect=lambda name, *a, **kw: (
-                mock_ort if name == "onnxruntime" else __import__(name, *a, **kw)
-            )):
+            with patch(
+                "builtins.__import__",
+                side_effect=lambda name, *a, **kw: (
+                    mock_ort if name == "onnxruntime" else __import__(name, *a, **kw)
+                ),
+            ):
                 vad.__init__("fake_model.onnx")
 
             assert vad.session is mock_session
@@ -520,6 +627,7 @@ class TestOnnxVAD:
     def test_reset_states(self):
         """Test OnnxVAD.reset_states zeros out hidden states."""
         from whisper_dictation.vad import OnnxVAD
+
         vad = OnnxVAD.__new__(OnnxVAD)
         vad._h = np.ones((2, 1, 64), dtype=np.float32)
         vad._c = np.ones((2, 1, 64), dtype=np.float32)
@@ -530,6 +638,7 @@ class TestOnnxVAD:
     def test_call_float32_input(self):
         """Test OnnxVAD __call__ with float32 input."""
         from whisper_dictation.vad import OnnxVAD
+
         vad = OnnxVAD.__new__(OnnxVAD)
         vad._h = np.zeros((2, 1, 64), dtype=np.float32)
         vad._c = np.zeros((2, 1, 64), dtype=np.float32)
@@ -553,6 +662,7 @@ class TestOnnxVAD:
     def test_call_int16_input_converted(self):
         """Test OnnxVAD __call__ converts int16 to float32."""
         from whisper_dictation.vad import OnnxVAD
+
         vad = OnnxVAD.__new__(OnnxVAD)
         vad._h = np.zeros((2, 1, 64), dtype=np.float32)
         vad._c = np.zeros((2, 1, 64), dtype=np.float32)
@@ -574,6 +684,7 @@ class TestOnnxVAD:
     def test_call_updates_hidden_states(self):
         """Test OnnxVAD __call__ updates _h and _c from session output."""
         from whisper_dictation.vad import OnnxVAD
+
         vad = OnnxVAD.__new__(OnnxVAD)
         vad._h = np.zeros((2, 1, 64), dtype=np.float32)
         vad._c = np.zeros((2, 1, 64), dtype=np.float32)

@@ -8,11 +8,9 @@ from io import BytesIO
 from unittest.mock import MagicMock, patch
 
 import numpy as np
-import pytest
 
 from whisper_dictation.audio import AudioStream, audio_to_wav, list_devices
 from whisper_dictation.config import AudioConfig
-
 
 # ---------------------------------------------------------------------------
 # audio_to_wav

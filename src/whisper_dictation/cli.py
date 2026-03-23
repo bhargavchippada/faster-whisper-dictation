@@ -8,22 +8,19 @@ import logging
 import os
 import signal
 import sys
-
 from pathlib import Path
 
 from .config import (
-    AudioConfig,
-    Config,
     CONFIG_DIR,
     CONFIG_FILE,
-    EngineConfig,
-    HotkeyConfig,
     PID_FILE,
-    ServerConfig,
     STATE_FILE,
-    VADConfig,
+    Config,
+    _validate,
     load_config,
 )
+
+log = logging.getLogger(__name__)
 
 
 def _apply_cli_overrides(
@@ -35,36 +32,23 @@ def _apply_cli_overrides(
     server_url: str | None = None,
 ) -> Config:
     """Apply CLI flag overrides to a config, returning a new Config."""
+    from dataclasses import replace
+
     hotkey_cfg = config.hotkey
     if mode:
-        hotkey_cfg = HotkeyConfig(binding=hotkey_cfg.binding, mode=mode)
+        hotkey_cfg = replace(hotkey_cfg, mode=mode)
     if hotkey:
-        hotkey_cfg = HotkeyConfig(binding=hotkey, mode=hotkey_cfg.mode)
+        hotkey_cfg = replace(hotkey_cfg, binding=hotkey)
 
     engine_cfg = config.engine
     if engine:
-        engine_cfg = EngineConfig(
-            type=engine,
-            compute_type=engine_cfg.compute_type,
-            device=engine_cfg.device,
-        )
+        engine_cfg = replace(engine_cfg, type=engine)
 
     server_cfg = config.server
     if server_url:
-        server_cfg = ServerConfig(
-            url=server_url,
-            model=server_cfg.model,
-            language=server_cfg.language,
-            timeout=server_cfg.timeout,
-        )
+        server_cfg = replace(server_cfg, url=server_url)
 
-    return Config(
-        server=server_cfg,
-        hotkey=hotkey_cfg,
-        vad=config.vad,
-        audio=config.audio,
-        engine=engine_cfg,
-    )
+    return replace(config, server=server_cfg, hotkey=hotkey_cfg, engine=engine_cfg)
 
 
 def _setup_logging(verbose: bool = False) -> None:
@@ -76,8 +60,13 @@ def _setup_logging(verbose: bool = False) -> None:
     )
 
 
+_pid_lock_fd: int | None = None
+
+
 def _write_pid() -> None:
     """Write current PID to file with an exclusive lock to prevent races."""
+    global _pid_lock_fd
+
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     try:
         import fcntl
@@ -92,37 +81,39 @@ def _write_pid() -> None:
         os.write(fd, str(os.getpid()).encode())
         os.fsync(fd)
         # Keep fd open to hold the lock for the daemon's lifetime
-        _write_pid._lock_fd = fd
+        _pid_lock_fd = fd
     except ImportError:
         # fcntl not available (Windows) — fall back to simple write
         PID_FILE.write_text(str(os.getpid()))
 
 
 def _read_pid() -> int | None:
+    """Read PID from file and verify the process is alive."""
     if PID_FILE.exists():
         try:
             pid = int(PID_FILE.read_text().strip())
             os.kill(pid, 0)
             return pid
-        except (ValueError, ProcessLookupError, PermissionError):
+        except (ValueError, ProcessLookupError, PermissionError, FileNotFoundError):
             PID_FILE.unlink(missing_ok=True)
     return None
 
 
 def _cleanup_pid() -> None:
-    # Release the lock fd if held
-    fd = getattr(_write_pid, "_lock_fd", None)
-    if fd is not None:
+    """Release the PID file lock and remove state files."""
+    global _pid_lock_fd
+
+    if _pid_lock_fd is not None:
         try:
-            os.close(fd)
+            os.close(_pid_lock_fd)
         except OSError:
             pass
-        _write_pid._lock_fd = None
+        _pid_lock_fd = None
     PID_FILE.unlink(missing_ok=True)
     STATE_FILE.unlink(missing_ok=True)
 
 
-def cmd_start(args) -> None:
+def cmd_start(args: argparse.Namespace) -> None:
     """Start the dictation daemon in the foreground."""
     from .daemon import DictationDaemon
 
@@ -139,17 +130,22 @@ def cmd_start(args) -> None:
         engine=args.engine,
         server_url=args.server_url,
     )
+    _validate(config)
 
     _write_pid()
 
     # Write state for status command
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    STATE_FILE.write_text(json.dumps({
-        "mode": config.hotkey.mode,
-        "hotkey": config.hotkey.binding,
-        "engine": config.engine.type,
-        "server_url": config.server.url,
-    }))
+    STATE_FILE.write_text(
+        json.dumps(
+            {
+                "mode": config.hotkey.mode,
+                "hotkey": config.hotkey.binding,
+                "engine": config.engine.type,
+                "server_url": config.server.url,
+            }
+        )
+    )
 
     daemon = DictationDaemon(config)
 
@@ -172,7 +168,7 @@ def cmd_start(args) -> None:
         _cleanup_pid()
 
 
-def cmd_stop(args) -> None:
+def cmd_stop(args: argparse.Namespace) -> None:
     """Stop the running dictation daemon."""
     pid = _read_pid()
     if pid is None:
@@ -188,7 +184,7 @@ def cmd_stop(args) -> None:
         _cleanup_pid()
 
 
-def cmd_status(args) -> None:
+def cmd_status(args: argparse.Namespace) -> None:
     """Show daemon status."""
     pid = _read_pid()
     if pid is None:
@@ -205,7 +201,7 @@ def cmd_status(args) -> None:
             print(f"  Engine:  {state.get('engine', '?')}")
             print(f"  Server:  {state.get('server_url', '?')}")
         except Exception:
-            pass
+            log.debug("Could not parse state file", exc_info=True)
 
 
 _DEFAULT_CONFIG_TEMPLATE = """\
@@ -223,24 +219,24 @@ binding = "alt+v"                     # Hotkey combo (e.g. "alt+v", "ctrl+shift+
 mode = "toggle"                       # "toggle" (press to start/stop) or "hold" (hold to speak)
 
 [vad]
-threshold = 0.5                       # Speech detection sensitivity (0.0-1.0, lower = more sensitive)
-silence_ms = 800                      # How long to wait after speech stops before transcribing (ms)
+threshold = 0.5                       # Speech detection sensitivity (0.0-1.0)
+silence_ms = 800                      # Wait after speech stops before transcribing (ms)
 min_speech_ms = 250                   # Ignore utterances shorter than this (ms)
 max_speech_s = 90.0                   # Maximum single utterance length (seconds)
 
 [audio]
 sample_rate = 16000                   # Sample rate in Hz (16000 is optimal for Whisper)
 channels = 1                          # Number of audio channels (1 = mono)
-# device = "fifine Microphone"        # Uncomment to use a specific mic (see: faster-whisper-dictation devices)
+# device = "fifine Microphone"        # Uncomment to use a specific mic
 
 [engine]
-type = "server"                       # "server" (Docker/remote) or "local" (built-in faster-whisper)
+type = "server"                       # "server" (Docker/remote) or "local" (local)
 compute_type = "auto"                 # "auto", "float16" (GPU), "int8" (CPU)
 device = "auto"                       # "auto", "cuda", "cpu"
 """
 
 
-def cmd_config(args) -> None:
+def cmd_config(args: argparse.Namespace) -> None:
     """Show current config or generate a default config file."""
     if args.generate:
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -260,34 +256,34 @@ def cmd_config(args) -> None:
     config = load_config()
     print(f"Config file: {CONFIG_FILE} ({'exists' if CONFIG_FILE.exists() else 'not found'})")
     print()
-    print(f"[server]")
+    print("[server]")
     print(f"  url          = {config.server.url}")
     print(f"  model        = {config.server.model}")
     print(f"  language     = {config.server.language}")
     print(f"  timeout      = {config.server.timeout}s")
     print()
-    print(f"[hotkey]")
+    print("[hotkey]")
     print(f"  binding      = {config.hotkey.binding}")
     print(f"  mode         = {config.hotkey.mode}")
     print()
-    print(f"[vad]")
+    print("[vad]")
     print(f"  threshold    = {config.vad.threshold}")
     print(f"  silence_ms   = {config.vad.silence_ms}ms")
     print(f"  min_speech   = {config.vad.min_speech_ms}ms")
     print(f"  max_speech   = {config.vad.max_speech_s}s")
     print()
-    print(f"[audio]")
+    print("[audio]")
     print(f"  sample_rate  = {config.audio.sample_rate}Hz")
     print(f"  channels     = {config.audio.channels}")
     print(f"  device       = {config.audio.device or '(system default)'}")
     print()
-    print(f"[engine]")
+    print("[engine]")
     print(f"  type         = {config.engine.type}")
     print(f"  compute_type = {config.engine.compute_type}")
     print(f"  device       = {config.engine.device}")
 
 
-def cmd_devices(args) -> None:
+def cmd_devices(args: argparse.Namespace) -> None:
     """List available audio input devices."""
     from .audio import list_devices
 
@@ -302,7 +298,7 @@ def cmd_devices(args) -> None:
         print(f"{d['index']:<8} {d['name']:<50} {d['channels']:<10} {d['sample_rate']:.0f}")
 
 
-def cmd_transcribe(args) -> None:
+def cmd_transcribe(args: argparse.Namespace) -> None:
     """Transcribe an audio file or record and transcribe."""
     import numpy as np
 
@@ -312,14 +308,11 @@ def cmd_transcribe(args) -> None:
         engine=args.engine,
         server_url=args.server_url,
     )
+    _validate(config)
 
-    from .engine.server import ServerEngine
+    from .engine import create_engine
 
-    if config.engine.type == "local":
-        from .engine.local import LocalEngine
-        engine = LocalEngine(config.server, config.engine)
-    else:
-        engine = ServerEngine(config.server)
+    engine = create_engine(config)
 
     if args.file:
         import wave
@@ -400,7 +393,12 @@ def main() -> None:
     # transcribe
     p_trans = sub.add_parser("transcribe", help="Transcribe audio file or recording")
     p_trans.add_argument("file", nargs="?", help="audio file to transcribe")
-    p_trans.add_argument("--record", type=float, metavar="SECONDS", help="record N seconds then transcribe")
+    p_trans.add_argument(
+        "--record",
+        type=float,
+        metavar="SECONDS",
+        help="record N seconds then transcribe",
+    )
     p_trans.add_argument("--engine", choices=["server", "local"], help="transcription engine")
     p_trans.add_argument("--server-url", help="whisper server URL")
     p_trans.add_argument("--config", type=Path, help="config file path")

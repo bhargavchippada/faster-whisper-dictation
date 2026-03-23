@@ -5,7 +5,7 @@ from __future__ import annotations
 import io
 import logging
 import wave
-from typing import Callable
+from collections.abc import Callable
 
 import numpy as np
 import sounddevice as sd
@@ -21,12 +21,14 @@ def list_devices() -> list[dict]:
     inputs = []
     for i, d in enumerate(devices):
         if d["max_input_channels"] > 0:
-            inputs.append({
-                "index": i,
-                "name": d["name"],
-                "channels": d["max_input_channels"],
-                "sample_rate": d["default_samplerate"],
-            })
+            inputs.append(
+                {
+                    "index": i,
+                    "name": d["name"],
+                    "channels": d["max_input_channels"],
+                    "sample_rate": d["default_samplerate"],
+                }
+            )
     return inputs
 
 

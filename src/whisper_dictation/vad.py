@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import threading
 
@@ -9,12 +10,19 @@ import numpy as np
 
 log = logging.getLogger(__name__)
 
-# Lazy-loaded model (protected by _model_lock)
-_model = None
+# SHA-256 hash of the known-good Silero VAD ONNX model
+_ONNX_MODEL_SHA256 = "1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3"
+_ONNX_MODEL_URL = (
+    "https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx"
+)
+
+# Lazy-loaded model (protected by _model_lock).
+# Typed as union because torch.hub.load returns an opaque callable, not OnnxVAD.
+_model: OnnxVAD | object | None = None
 _model_lock = threading.Lock()
 
 
-def _load_model():
+def _load_model() -> None:
     """Load Silero VAD model (lazy, thread-safe, first call only)."""
     global _model
 
@@ -41,7 +49,21 @@ def _load_model():
             _load_onnx_model()
 
 
-def _load_onnx_model():
+def _verify_model_hash(path: str | bytes, expected: str) -> None:
+    """Verify SHA-256 hash of a downloaded model file."""
+    from pathlib import Path
+
+    data = Path(path).read_bytes()
+    actual = hashlib.sha256(data).hexdigest()
+    if actual != expected:
+        Path(path).unlink(missing_ok=True)
+        raise RuntimeError(
+            f"Model integrity check failed: expected SHA-256 {expected[:16]}..., "
+            f"got {actual[:16]}... — file deleted. Retry to re-download."
+        )
+
+
+def _load_onnx_model() -> None:
     """Load Silero VAD via ONNX Runtime (no PyTorch needed)."""
     global _model
 
@@ -53,12 +75,16 @@ def _load_onnx_model():
     cache = Path(user_cache_dir("whisper-dictation")) / "silero_vad.onnx"
     if not cache.exists():
         cache.parent.mkdir(parents=True, exist_ok=True)
-        url = "https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx"
+        tmp = cache.with_suffix(".tmp")
         log.info("Downloading Silero VAD ONNX model...")
-        urllib.request.urlretrieve(url, cache)
+        try:
+            urllib.request.urlretrieve(_ONNX_MODEL_URL, tmp)
+            _verify_model_hash(tmp, _ONNX_MODEL_SHA256)
+            tmp.rename(cache)
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            raise
         log.info("Downloaded to %s", cache)
-
-    import onnxruntime as ort
 
     _model = OnnxVAD(str(cache))
     log.info("Silero VAD ONNX model loaded")
@@ -78,7 +104,7 @@ class OnnxVAD:
         self._c = np.zeros((2, 1, 64), dtype=np.float32)
         self._sr = np.array(16000, dtype=np.int64)
 
-    def reset_states(self):
+    def reset_states(self) -> None:
         self._h = np.zeros((2, 1, 64), dtype=np.float32)
         self._c = np.zeros((2, 1, 64), dtype=np.float32)
 
@@ -130,12 +156,12 @@ class SpeechDetector:
         self._buffer = np.array([], dtype=np.float32)
         self._model_loaded = False
 
-    def _ensure_model(self):
+    def _ensure_model(self) -> None:
         if not self._model_loaded:
             _load_model()
             self._model_loaded = True
 
-    def reset(self):
+    def reset(self) -> None:
         """Reset detector state for a new session."""
         self._is_speaking = False
         self._silence_count = 0
@@ -192,6 +218,7 @@ class SpeechDetector:
                     self._is_speaking = False
                     self._silence_count = 0
                     self._speech_count = 0
+                    break  # return immediately to avoid overwriting
 
             elif self._is_speaking:
                 self._silence_count += 1
@@ -212,6 +239,9 @@ class SpeechDetector:
                     self._is_speaking = False
                     self._silence_count = 0
                     self._speech_count = 0
+
+                    if completed_utterance is not None:
+                        break  # return immediately to avoid overwriting
 
         return (completed_utterance is not None, completed_utterance)
 

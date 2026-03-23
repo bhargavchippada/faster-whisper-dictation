@@ -8,7 +8,6 @@ import pytest
 
 from whisper_dictation.hotkey.listener import HotkeyListener, _parse_hotkey
 
-
 # ---------------------------------------------------------------------------
 # _parse_hotkey
 # ---------------------------------------------------------------------------
@@ -184,9 +183,12 @@ class TestUseEvdev:
             patch("whisper_dictation.hotkey.listener.sys") as mock_sys,
             patch.dict("os.environ", {"XDG_SESSION_TYPE": "wayland"}),
             patch.dict("sys.modules", {"evdev": mock_evdev}),
-            patch("builtins.__import__", side_effect=lambda name, *a, **kw: (
-                mock_evdev if name == "evdev" else __import__(name, *a, **kw)
-            )),
+            patch(
+                "builtins.__import__",
+                side_effect=lambda name, *a, **kw: (
+                    mock_evdev if name == "evdev" else __import__(name, *a, **kw)
+                ),
+            ),
         ):
             mock_sys.platform = "linux"
             assert listener._use_evdev() is True
@@ -311,7 +313,7 @@ class TestStartPynput:
         # Get the on_press and on_release callbacks
         call_kwargs = mock_keyboard.Listener.call_args[1]
         on_press = call_kwargs["on_press"]
-        on_release = call_kwargs["on_release"]
+        call_kwargs["on_release"]
 
         # Simulate pressing alt
         on_press(mock_alt_key)
@@ -348,7 +350,10 @@ class TestStartPynput:
         mock_pynput_listener = MagicMock()
         mock_keyboard.Listener.return_value = mock_pynput_listener
 
-        with patch.dict("sys.modules", {"pynput": MagicMock(keyboard=mock_keyboard), "pynput.keyboard": mock_keyboard}):
+        with patch.dict(
+            "sys.modules",
+            {"pynput": MagicMock(keyboard=mock_keyboard), "pynput.keyboard": mock_keyboard},
+        ):
             listener._start_pynput()
 
         on_press = mock_keyboard.Listener.call_args[1]["on_press"]
@@ -385,7 +390,10 @@ class TestStartPynput:
         mock_pynput_listener = MagicMock()
         mock_keyboard.Listener.return_value = mock_pynput_listener
 
-        with patch.dict("sys.modules", {"pynput": MagicMock(keyboard=mock_keyboard), "pynput.keyboard": mock_keyboard}):
+        with patch.dict(
+            "sys.modules",
+            {"pynput": MagicMock(keyboard=mock_keyboard), "pynput.keyboard": mock_keyboard},
+        ):
             listener._start_pynput()
 
         call_kwargs = mock_keyboard.Listener.call_args[1]
@@ -429,7 +437,10 @@ class TestStartPynput:
         mock_pynput_listener = MagicMock()
         mock_keyboard.Listener.return_value = mock_pynput_listener
 
-        with patch.dict("sys.modules", {"pynput": MagicMock(keyboard=mock_keyboard), "pynput.keyboard": mock_keyboard}):
+        with patch.dict(
+            "sys.modules",
+            {"pynput": MagicMock(keyboard=mock_keyboard), "pynput.keyboard": mock_keyboard},
+        ):
             listener._start_pynput()
 
         call_kwargs = mock_keyboard.Listener.call_args[1]
@@ -472,7 +483,10 @@ class TestStartPynput:
         mock_pynput_listener = MagicMock()
         mock_keyboard.Listener.return_value = mock_pynput_listener
 
-        with patch.dict("sys.modules", {"pynput": MagicMock(keyboard=mock_keyboard), "pynput.keyboard": mock_keyboard}):
+        with patch.dict(
+            "sys.modules",
+            {"pynput": MagicMock(keyboard=mock_keyboard), "pynput.keyboard": mock_keyboard},
+        ):
             listener._start_pynput()
 
         on_press = mock_keyboard.Listener.call_args[1]["on_press"]
@@ -511,7 +525,10 @@ class TestStartPynput:
         mock_pynput_listener = MagicMock()
         mock_keyboard.Listener.return_value = mock_pynput_listener
 
-        with patch.dict("sys.modules", {"pynput": MagicMock(keyboard=mock_keyboard), "pynput.keyboard": mock_keyboard}):
+        with patch.dict(
+            "sys.modules",
+            {"pynput": MagicMock(keyboard=mock_keyboard), "pynput.keyboard": mock_keyboard},
+        ):
             listener._start_pynput()
 
         on_press = mock_keyboard.Listener.call_args[1]["on_press"]
@@ -619,7 +636,10 @@ class TestEvdevLoop:
         mock_dev.read.return_value = [alt_down, v_down]
 
         with (
-            patch.dict("sys.modules", {"evdev": mock_evdev, "evdev.ecodes": mock_ecodes, "select": MagicMock()}),
+            patch.dict(
+                "sys.modules",
+                {"evdev": mock_evdev, "evdev.ecodes": mock_ecodes, "select": MagicMock()},
+            ),
             patch("select.select", side_effect=mock_select),
         ):
             try:
@@ -665,7 +685,10 @@ class TestEvdevLoop:
         mock_dev.read.return_value = [alt_down, v_down, v_up]
 
         with (
-            patch.dict("sys.modules", {"evdev": mock_evdev, "evdev.ecodes": mock_ecodes, "select": MagicMock()}),
+            patch.dict(
+                "sys.modules",
+                {"evdev": mock_evdev, "evdev.ecodes": mock_ecodes, "select": MagicMock()},
+            ),
             patch("select.select", side_effect=mock_select),
         ):
             try:
@@ -712,7 +735,10 @@ class TestEvdevLoop:
         mock_dev.read.return_value = [alt_down, v_down, alt_up]
 
         with (
-            patch.dict("sys.modules", {"evdev": mock_evdev, "evdev.ecodes": mock_ecodes, "select": MagicMock()}),
+            patch.dict(
+                "sys.modules",
+                {"evdev": mock_evdev, "evdev.ecodes": mock_ecodes, "select": MagicMock()},
+            ),
             patch("select.select", side_effect=mock_select),
         ):
             try:
@@ -755,7 +781,10 @@ class TestEvdevLoop:
         mock_dev.read.return_value = [non_key_event]
 
         with (
-            patch.dict("sys.modules", {"evdev": mock_evdev, "evdev.ecodes": mock_ecodes, "select": MagicMock()}),
+            patch.dict(
+                "sys.modules",
+                {"evdev": mock_evdev, "evdev.ecodes": mock_ecodes, "select": MagicMock()},
+            ),
             patch("select.select", side_effect=mock_select),
         ):
             try:
@@ -793,7 +822,10 @@ class TestEvdevLoop:
             raise KeyboardInterrupt
 
         with (
-            patch.dict("sys.modules", {"evdev": mock_evdev, "evdev.ecodes": mock_ecodes, "select": MagicMock()}),
+            patch.dict(
+                "sys.modules",
+                {"evdev": mock_evdev, "evdev.ecodes": mock_ecodes, "select": MagicMock()},
+            ),
             patch("select.select", side_effect=mock_select),
         ):
             try:
@@ -806,8 +838,6 @@ class TestEvdevLoop:
         listener = HotkeyListener("alt+v", "toggle", MagicMock(), MagicMock())
 
         mock_evdev, mock_ecodes = self._make_mock_evdev()
-
-        KEY_V = mock_ecodes.KEY_V
 
         # Device that doesn't have KEY_V
         mock_dev = MagicMock()

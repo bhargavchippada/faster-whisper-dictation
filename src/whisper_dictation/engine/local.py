@@ -46,6 +46,7 @@ class LocalEngine(TranscriptionEngine):
             if device == "auto":
                 try:
                     import torch
+
                     device = "cuda" if torch.cuda.is_available() else "cpu"
                 except ImportError:
                     device = "cpu"
@@ -55,7 +56,9 @@ class LocalEngine(TranscriptionEngine):
 
             log.info(
                 "Loading model %s on %s (%s)...",
-                self._model_name, device, compute_type,
+                self._model_name,
+                device,
+                compute_type,
             )
             self._model = WhisperModel(
                 self._model_name,

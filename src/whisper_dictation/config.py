@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import os
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
+from typing import Any
+from urllib.parse import urlparse
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -13,7 +15,6 @@ else:
     import tomli as tomllib
 
 from platformdirs import user_config_dir
-
 
 APP_NAME = "whisper-dictation"
 CONFIG_DIR = Path(user_config_dir(APP_NAME))
@@ -103,17 +104,24 @@ def _apply_env_overrides(config: Config) -> Config:
     if not any(sections.values()):
         return config
 
-    def _merge_section(current, overrides, cls):
+    def _merge_section(current: Any, overrides: dict[str, Any], cls: type) -> Any:
         if not overrides:
             return current
         merged = {}
-        for f in current.__dataclass_fields__:
-            val = overrides.get(f, getattr(current, f))
+        for f in fields(current):
+            val = overrides.get(f.name, getattr(current, f.name))
             # Coerce types
-            expected = type(getattr(current, f)) if getattr(current, f) is not None else str
+            current_val = getattr(current, f.name)
+            expected = type(current_val) if current_val is not None else str
             if isinstance(val, str) and expected in (int, float):
-                val = expected(val)
-            merged[f] = val
+                try:
+                    val = expected(val)
+                except (ValueError, TypeError) as exc:
+                    raise ValueError(
+                        f"Invalid value for environment variable "
+                        f"(expected {expected.__name__}): {val!r}"
+                    ) from exc
+            merged[f.name] = val
         return cls(**merged)
 
     return Config(
@@ -125,9 +133,9 @@ def _apply_env_overrides(config: Config) -> Config:
     )
 
 
-def _build_section(data: dict, cls):
+def _build_section(data: dict[str, Any], cls: type) -> Any:
     """Build a dataclass from a dict, ignoring unknown keys."""
-    known = {f for f in cls.__dataclass_fields__}
+    known = {f.name for f in fields(cls)}
     filtered = {k: v for k, v in data.items() if k in known}
     return cls(**filtered)
 
@@ -182,6 +190,16 @@ def _validate(config: Config) -> None:
 
     if config.audio.sample_rate <= 0:
         errors.append(f"audio.sample_rate must be positive, got {config.audio.sample_rate}")
+
+    # Validate server URL scheme
+    try:
+        parsed = urlparse(config.server.url)
+        if parsed.scheme not in ("http", "https"):
+            errors.append(f"server.url must use http or https scheme, got '{parsed.scheme}'")
+        if not parsed.hostname:
+            errors.append("server.url must have a valid hostname")
+    except Exception:
+        errors.append(f"server.url is not a valid URL: {config.server.url!r}")
 
     if errors:
         raise ValueError("Invalid configuration:\n  - " + "\n  - ".join(errors))

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import sys
-from types import ModuleType
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -73,7 +72,9 @@ class TestEnsureModel:
         assert engine._model is mock_model_instance
 
     def test_loads_model_with_cuda_float16(self, server_config):
-        eng = LocalEngine(server_config, EngineConfig(type="local", compute_type="auto", device="auto"))
+        eng = LocalEngine(
+            server_config, EngineConfig(type="local", compute_type="auto", device="auto")
+        )
 
         mock_whisper = MagicMock()
         mock_torch = MagicMock()
@@ -119,7 +120,6 @@ class TestEnsureModel:
 
     def test_double_checked_locking_returns_early(self, engine):
         """Cover line 33: _model set between outer check and lock acquisition."""
-        import threading
 
         original_lock = engine._model_lock
         sentinel = MagicMock(name="already_loaded_model")

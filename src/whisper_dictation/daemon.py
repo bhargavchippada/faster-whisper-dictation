@@ -9,21 +9,13 @@ import numpy as np
 
 from .audio import AudioStream
 from .config import Config
-from .engine.server import ServerEngine
+from .engine import TranscriptionEngine, create_engine
 from .hotkey import HotkeyListener
 from .notifier import notify
 from .typer import type_text
 from .vad import SpeechDetector
 
 log = logging.getLogger(__name__)
-
-
-def _create_engine(config: Config) -> TranscriptionEngine:
-    """Create the transcription engine based on config."""
-    if config.engine.type == "local":
-        from .engine.local import LocalEngine
-        return LocalEngine(config.server, config.engine)
-    return ServerEngine(config.server)
 
 
 class DictationDaemon:
@@ -35,7 +27,7 @@ class DictationDaemon:
 
     def __init__(self, config: Config):
         self.config = config
-        self._engine = _create_engine(config)
+        self._engine: TranscriptionEngine = create_engine(config)
         self._vad = SpeechDetector(
             sample_rate=config.audio.sample_rate,
             threshold=config.vad.threshold,
@@ -115,8 +107,7 @@ class DictationDaemon:
             engine_type = self.config.engine.type
             if engine_type == "server":
                 log.error(
-                    "Server not reachable at %s. "
-                    "Start with: docker compose up -d",
+                    "Server not reachable at %s. Start with: docker compose up -d",
                     self.config.server.url,
                 )
             else:
@@ -139,7 +130,9 @@ class DictationDaemon:
         engine = self.config.engine.type
         log.info(
             "Dictation daemon started: hotkey=%s, mode=%s, engine=%s",
-            binding, mode, engine,
+            binding,
+            mode,
+            engine,
         )
         notify(
             "Dictation Ready",
@@ -150,7 +143,9 @@ class DictationDaemon:
         """Stop the dictation daemon."""
         self._running.clear()
 
-        if self._recording:
+        with self._lock:
+            should_deactivate = self._recording
+        if should_deactivate:
             self._on_deactivate()
 
         if self._hotkey is not None:

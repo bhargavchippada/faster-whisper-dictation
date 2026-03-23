@@ -5,14 +5,11 @@ from __future__ import annotations
 import json
 import os
 import signal
-import sys
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from whisper_dictation.cli import (
-    _DEFAULT_CONFIG_TEMPLATE,
     _cleanup_pid,
     _read_pid,
     _setup_logging,
@@ -26,7 +23,6 @@ from whisper_dictation.cli import (
     main,
 )
 
-
 # ---------------------------------------------------------------------------
 # _setup_logging
 # ---------------------------------------------------------------------------
@@ -36,6 +32,7 @@ class TestSetupLogging:
     @patch("whisper_dictation.cli.logging.basicConfig")
     def test_default_info_level(self, mock_config):
         import logging
+
         _setup_logging(verbose=False)
         mock_config.assert_called_once()
         assert mock_config.call_args[1]["level"] == logging.INFO
@@ -43,6 +40,7 @@ class TestSetupLogging:
     @patch("whisper_dictation.cli.logging.basicConfig")
     def test_verbose_debug_level(self, mock_config):
         import logging
+
         _setup_logging(verbose=True)
         assert mock_config.call_args[1]["level"] == logging.DEBUG
 
@@ -138,6 +136,7 @@ class TestPidManagement:
 
         # Make fcntl import raise ImportError inside _write_pid
         import builtins
+
         real_import = builtins.__import__
 
         def fake_import(name, *args, **kwargs):
@@ -156,13 +155,15 @@ class TestPidManagement:
         assert int(pid_file.read_text()) == os.getpid()
 
     def test_cleanup_pid_closes_lock_fd(self, tmp_path):
-        """Test _cleanup_pid closes the lock fd when _write_pid._lock_fd is set."""
+        """Test _cleanup_pid closes the lock fd when _pid_lock_fd is set."""
+        import whisper_dictation.cli as cli_mod
+
         pid_file = tmp_path / "daemon.pid"
         state_file = tmp_path / "state.json"
         pid_file.write_text("123")
 
-        # Set _lock_fd on _write_pid
-        _write_pid._lock_fd = 42
+        # Set the module-level _pid_lock_fd
+        cli_mod._pid_lock_fd = 42
 
         with (
             patch("whisper_dictation.cli.PID_FILE", pid_file),
@@ -172,15 +173,17 @@ class TestPidManagement:
             _cleanup_pid()
 
         mock_close.assert_called_once_with(42)
-        assert _write_pid._lock_fd is None
+        assert cli_mod._pid_lock_fd is None
 
     def test_cleanup_pid_close_oserror_suppressed(self, tmp_path):
         """Test _cleanup_pid suppresses OSError when closing lock fd."""
+        import whisper_dictation.cli as cli_mod
+
         pid_file = tmp_path / "daemon.pid"
         state_file = tmp_path / "state.json"
         pid_file.write_text("123")
 
-        _write_pid._lock_fd = 42
+        cli_mod._pid_lock_fd = 42
 
         with (
             patch("whisper_dictation.cli.PID_FILE", pid_file),
@@ -190,7 +193,7 @@ class TestPidManagement:
             # Should not raise
             _cleanup_pid()
 
-        assert _write_pid._lock_fd is None
+        assert cli_mod._pid_lock_fd is None
 
 
 # ---------------------------------------------------------------------------
@@ -251,12 +254,16 @@ class TestCmdStatus:
     def test_status_running(self, tmp_path, capsys):
         pid_file = tmp_path / "daemon.pid"
         state_file = tmp_path / "state.json"
-        state_file.write_text(json.dumps({
-            "mode": "toggle",
-            "hotkey": "alt+v",
-            "engine": "server",
-            "server_url": "http://localhost:10300",
-        }))
+        state_file.write_text(
+            json.dumps(
+                {
+                    "mode": "toggle",
+                    "hotkey": "alt+v",
+                    "engine": "server",
+                    "server_url": "http://localhost:10300",
+                }
+            )
+        )
 
         with (
             patch("whisper_dictation.cli.PID_FILE", pid_file),
@@ -498,7 +505,7 @@ class TestCmdStart:
         with (
             patch("whisper_dictation.cli._read_pid", return_value=None),
             patch("whisper_dictation.cli.load_config", return_value=Config()),
-            patch("whisper_dictation.daemon.DictationDaemon", return_value=mock_daemon) as mock_cls,
+            patch("whisper_dictation.daemon.DictationDaemon", return_value=mock_daemon),
             patch("whisper_dictation.cli._write_pid"),
             patch("whisper_dictation.cli._cleanup_pid") as mock_cleanup,
             patch("whisper_dictation.cli.CONFIG_DIR", tmp_path),
@@ -571,6 +578,7 @@ class TestCmdTranscribe:
 
     def test_transcribe_file(self, tmp_path):
         import wave
+
         import numpy as np
 
         from whisper_dictation.config import Config
@@ -596,7 +604,7 @@ class TestCmdTranscribe:
 
         with (
             patch("whisper_dictation.cli.load_config", return_value=Config()),
-            patch("whisper_dictation.engine.server.ServerEngine", return_value=mock_engine),
+            patch("whisper_dictation.engine.create_engine", return_value=mock_engine),
         ):
             cmd_transcribe(args)
         mock_engine.transcribe.assert_called_once()
@@ -622,7 +630,7 @@ class TestCmdTranscribe:
 
         with (
             patch("whisper_dictation.cli.load_config", return_value=Config()),
-            patch("whisper_dictation.engine.server.ServerEngine", return_value=mock_engine),
+            patch("whisper_dictation.engine.create_engine", return_value=mock_engine),
             patch.dict("sys.modules", {"sounddevice": mock_sd}),
         ):
             cmd_transcribe(args)
@@ -651,7 +659,7 @@ class TestCmdTranscribe:
 
         with (
             patch("whisper_dictation.cli.load_config", return_value=Config()),
-            patch("whisper_dictation.engine.server.ServerEngine", return_value=mock_engine),
+            patch("whisper_dictation.engine.create_engine", return_value=mock_engine),
             patch.dict("sys.modules", {"sounddevice": mock_sd}),
             pytest.raises(SystemExit),
         ):
@@ -659,6 +667,7 @@ class TestCmdTranscribe:
 
     def test_transcribe_with_server_url_override(self, tmp_path):
         import wave
+
         import numpy as np
 
         from whisper_dictation.config import Config
@@ -683,15 +692,18 @@ class TestCmdTranscribe:
 
         with (
             patch("whisper_dictation.cli.load_config", return_value=Config()),
-            patch("whisper_dictation.engine.server.ServerEngine", return_value=mock_engine) as mock_cls,
+            patch(
+                "whisper_dictation.engine.create_engine", return_value=mock_engine
+            ) as mock_create,
         ):
             cmd_transcribe(args)
-        # Verify server URL was overridden
-        call_args = mock_cls.call_args[0][0]
-        assert call_args.url == "http://custom:9000"
+        # Verify server URL was overridden in the config passed to create_engine
+        call_config = mock_create.call_args[0][0]
+        assert call_config.server.url == "http://custom:9000"
 
     def test_transcribe_with_engine_override(self, tmp_path):
         import wave
+
         import numpy as np
 
         from whisper_dictation.config import Config
@@ -716,13 +728,14 @@ class TestCmdTranscribe:
 
         with (
             patch("whisper_dictation.cli.load_config", return_value=Config()),
-            patch("whisper_dictation.engine.local.LocalEngine", return_value=mock_engine),
+            patch("whisper_dictation.engine.create_engine", return_value=mock_engine),
         ):
             cmd_transcribe(args)
         mock_engine.transcribe.assert_called_once()
 
     def test_transcribe_file_no_speech(self, tmp_path):
         import wave
+
         import numpy as np
 
         from whisper_dictation.config import Config
@@ -747,7 +760,7 @@ class TestCmdTranscribe:
 
         with (
             patch("whisper_dictation.cli.load_config", return_value=Config()),
-            patch("whisper_dictation.engine.server.ServerEngine", return_value=mock_engine),
+            patch("whisper_dictation.engine.create_engine", return_value=mock_engine),
             pytest.raises(SystemExit),
         ):
             cmd_transcribe(args)
@@ -768,7 +781,7 @@ class TestMain:
     def test_verbose_flag(self):
         with (
             patch("sys.argv", ["prog", "-v", "status"]),
-            patch("whisper_dictation.cli.cmd_status") as mock_status,
+            patch("whisper_dictation.cli.cmd_status"),
             patch("whisper_dictation.cli._setup_logging") as mock_logging,
         ):
             main()
@@ -776,13 +789,21 @@ class TestMain:
 
     def test_start_subcommand_with_args(self):
         with (
-            patch("sys.argv", [
-                "prog", "start",
-                "--mode", "hold",
-                "--hotkey", "ctrl+d",
-                "--engine", "local",
-                "--server-url", "http://x:9000",
-            ]),
+            patch(
+                "sys.argv",
+                [
+                    "prog",
+                    "start",
+                    "--mode",
+                    "hold",
+                    "--hotkey",
+                    "ctrl+d",
+                    "--engine",
+                    "local",
+                    "--server-url",
+                    "http://x:9000",
+                ],
+            ),
             patch("whisper_dictation.cli.cmd_start") as mock_start,
             patch("whisper_dictation.cli._setup_logging"),
         ):

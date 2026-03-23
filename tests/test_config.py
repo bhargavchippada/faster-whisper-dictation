@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import textwrap
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -20,7 +19,6 @@ from whisper_dictation.config import (
     _validate,
     load_config,
 )
-
 
 # ---------------------------------------------------------------------------
 # Defaults
@@ -174,6 +172,12 @@ class TestApplyEnvOverrides:
             result = _apply_env_overrides(cfg)
         assert result.vad.min_speech_ms == 500
 
+    def test_invalid_numeric_env_raises(self):
+        cfg = Config()
+        with patch.dict("os.environ", {"DICTATION_VAD_THRESHOLD": "not_a_number"}, clear=True):
+            with pytest.raises(ValueError, match="Invalid value for environment variable"):
+                _apply_env_overrides(cfg)
+
 
 # ---------------------------------------------------------------------------
 # load_config
@@ -189,7 +193,8 @@ class TestLoadConfig:
 
     def test_load_from_toml(self, tmp_path):
         toml_path = tmp_path / "config.toml"
-        toml_path.write_text(textwrap.dedent("""\
+        toml_path.write_text(
+            textwrap.dedent("""\
             [server]
             url = "http://myserver:8080"
             language = "ja"
@@ -207,7 +212,8 @@ class TestLoadConfig:
 
             [engine]
             type = "local"
-        """))
+        """)
+        )
         with patch.dict("os.environ", {}, clear=True):
             cfg = load_config(toml_path)
 
@@ -222,7 +228,7 @@ class TestLoadConfig:
 
     def test_partial_toml(self, tmp_path):
         toml_path = tmp_path / "config.toml"
-        toml_path.write_text("[server]\nmodel = \"tiny\"\n")
+        toml_path.write_text('[server]\nmodel = "tiny"\n')
         with patch.dict("os.environ", {}, clear=True):
             cfg = load_config(toml_path)
         assert cfg.server.model == "tiny"
@@ -231,14 +237,14 @@ class TestLoadConfig:
 
     def test_toml_with_unknown_keys(self, tmp_path):
         toml_path = tmp_path / "config.toml"
-        toml_path.write_text("[server]\nurl = \"http://x\"\nfoo = \"bar\"\n")
+        toml_path.write_text('[server]\nurl = "http://x"\nfoo = "bar"\n')
         with patch.dict("os.environ", {}, clear=True):
             cfg = load_config(toml_path)
         assert cfg.server.url == "http://x"
 
     def test_env_overrides_toml(self, tmp_path):
         toml_path = tmp_path / "config.toml"
-        toml_path.write_text("[server]\nurl = \"http://toml\"\n")
+        toml_path.write_text('[server]\nurl = "http://toml"\n')
         with patch.dict("os.environ", {"WHISPER_SERVER_URL": "http://env"}, clear=True):
             cfg = load_config(toml_path)
         assert cfg.server.url == "http://env"
@@ -277,6 +283,7 @@ class TestTomllibImport:
                 patch.dict("sys.modules", {"tomli": mock_tomli, "tomllib": None}),
             ):
                 import whisper_dictation.config as config_mod
+
                 importlib.reload(config_mod)
         finally:
             # Restore original module
@@ -349,3 +356,26 @@ class TestValidate:
         msg = str(exc_info.value)
         assert "engine.type" in msg
         assert "vad.threshold" in msg
+
+    def test_server_url_invalid_scheme(self):
+        cfg = Config(server=ServerConfig(url="ftp://example.com"))
+        with pytest.raises(ValueError, match="server.url must use http or https"):
+            _validate(cfg)
+
+    def test_server_url_no_hostname(self):
+        cfg = Config(server=ServerConfig(url="http://"))
+        with pytest.raises(ValueError, match="server.url must have a valid hostname"):
+            _validate(cfg)
+
+    def test_server_url_valid_https(self):
+        cfg = Config(server=ServerConfig(url="https://whisper.example.com:8080"))
+        _validate(cfg)  # should not raise
+
+    def test_server_url_parse_exception(self):
+        """Test _validate catches urlparse exceptions."""
+        cfg = Config(server=ServerConfig(url="http://valid.com"))
+        with (
+            patch("whisper_dictation.config.urlparse", side_effect=ValueError("bad url")),
+            pytest.raises(ValueError, match="server.url is not a valid URL"),
+        ):
+            _validate(cfg)

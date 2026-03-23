@@ -9,7 +9,7 @@ import logging
 import os
 import sys
 import threading
-from typing import Callable
+from collections.abc import Callable
 
 log = logging.getLogger(__name__)
 
@@ -60,6 +60,7 @@ class HotkeyListener:
         if session_type == "wayland":
             try:
                 import evdev  # noqa: F401
+
                 return True
             except ImportError:
                 log.warning(
@@ -91,8 +92,7 @@ class HotkeyListener:
         from pynput import keyboard
 
         modifier_map = {
-            "alt": {keyboard.Key.alt, keyboard.Key.alt_l, keyboard.Key.alt_r,
-                    keyboard.Key.alt_gr},
+            "alt": {keyboard.Key.alt, keyboard.Key.alt_l, keyboard.Key.alt_r, keyboard.Key.alt_gr},
             "ctrl": {keyboard.Key.ctrl, keyboard.Key.ctrl_l, keyboard.Key.ctrl_r},
             "control": {keyboard.Key.ctrl, keyboard.Key.ctrl_l, keyboard.Key.ctrl_r},
             "shift": {keyboard.Key.shift, keyboard.Key.shift_l, keyboard.Key.shift_r},
@@ -168,8 +168,10 @@ class HotkeyListener:
             "meta": {ecodes.KEY_LEFTMETA, ecodes.KEY_RIGHTMETA},
         }
 
-        letter_map = {chr(c): getattr(ecodes, f"KEY_{chr(c).upper()}", None)
-                      for c in range(ord("a"), ord("z") + 1)}
+        letter_map = {
+            chr(c): getattr(ecodes, f"KEY_{chr(c).upper()}", None)
+            for c in range(ord("a"), ord("z") + 1)
+        }
 
         target_key = letter_map.get(self._key)
         if target_key is None:
@@ -226,8 +228,12 @@ class HotkeyListener:
                                 self._handle_release()
 
                         # Hold mode: modifier release deactivates
-                        if (self.mode == "hold" and self._active and
-                                event.value == 0 and event.code in required_codes):
+                        if (
+                            self.mode == "hold"
+                            and self._active
+                            and event.value == 0
+                            and event.code in required_codes
+                        ):
                             if not mods_held:
                                 self._handle_release()
 

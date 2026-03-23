@@ -16,6 +16,7 @@ src/whisper_dictation/
 ├── typer.py            # Platform-aware text input (clipboard + paste)
 ├── notifier.py         # Cross-platform desktop notifications
 ├── engine/
+│   ├── __init__.py     # Package exports + create_engine() factory
 │   ├── base.py         # TranscriptionEngine ABC
 │   ├── server.py       # REST API engine (Speaches, OpenAI-compatible)
 │   └── local.py        # Local faster-whisper engine (optional dependency)
@@ -27,7 +28,7 @@ src/whisper_dictation/
 ## Key Design Decisions
 
 - **Immutable config**: All config dataclasses are `frozen=True`. Build new instances, never mutate.
-- **Engine abstraction**: `TranscriptionEngine` ABC allows swapping server/local backends transparently.
+- **Engine factory**: `create_engine()` in `engine/__init__.py` centralizes engine instantiation. `TranscriptionEngine` ABC allows swapping server/local backends transparently.
 - **Silero VAD over RMS energy**: Silero is ML-based, far more accurate for speech detection.
 - **ONNX by default**: VAD uses ONNX Runtime, not PyTorch, to keep the dependency footprint small.
 - **pynput + evdev**: pynput handles macOS/Windows/X11; evdev handles Linux Wayland where pynput fails.
@@ -39,10 +40,13 @@ src/whisper_dictation/
   Windows clipboard uses Win32 API directly instead of PowerShell to avoid injection.
 - **Clipboard hygiene**: Previous clipboard contents are saved before paste and restored after.
   Wayland `wl-copy` uses `--` to prevent argument injection from text starting with `-`.
-- **PID file race conditions**: PID file uses `os.kill(pid, 0)` to verify process liveness before reuse.
+- **PID file locking**: PID file uses `fcntl.flock` for exclusive access on Unix, with `os.kill(pid, 0)` for liveness checks. Lock fd stored in module-level `_pid_lock_fd`.
 - **No network exposure**: Docker server binds to `127.0.0.1` only. Audio never leaves localhost.
-- **VAD model download**: ONNX model is fetched from GitHub over HTTPS and cached locally.
-- **Input validation**: Config values are type-checked via frozen dataclasses.
+- **VAD model integrity**: ONNX model is fetched from GitHub over HTTPS, verified via SHA-256 hash, and cached locally. Hash mismatch deletes the file and raises `RuntimeError`.
+- **Windows clipboard safety**: `OpenClipboard` return values are checked; allocated memory is freed on failure.
+- **Server URL validation**: `_validate()` checks that `server.url` uses http/https scheme and has a valid hostname. Prevents SSRF via config injection.
+- **Input validation**: Config values are type-checked via frozen dataclasses with explicit validation. Environment variable overrides are coerced with clear error messages on type mismatch.
+- **Paste delay validation**: `DICTATION_PASTE_DELAY` is validated at import time (must be 0.0-10.0, rejects NaN/Inf).
 
 ## Development
 
@@ -89,7 +93,7 @@ GitHub Actions runs on every push/PR to main:
 | Feature | Linux X11 | Linux Wayland | macOS | Windows |
 |---------|-----------|---------------|-------|---------|
 | Hotkey | pynput | evdev | pynput | pynput |
-| Typing | xdotool+xclip | ydotool+wl-clipboard | pbcopy+osascript | ctypes+powershell |
+| Typing | xdotool+xclip | ydotool+wl-clipboard | pbcopy+osascript | ctypes (Win32 API) |
 | Notify | notify-send | notify-send | osascript | plyer |
 | Audio | sounddevice | sounddevice | sounddevice | sounddevice |
 
@@ -101,5 +105,7 @@ GitHub Actions runs on every push/PR to main:
 - No shell scripts — everything is Python
 - Type hints on all public functions
 - Logging via `logging` module, not print statements
-- Immutable data patterns — frozen dataclasses, no mutation
+- Immutable data patterns — frozen dataclasses, `dataclasses.replace()` for overrides
 - All errors handled explicitly — no silent swallowing
+- Use `collections.abc.Callable` (not `typing.Callable`)
+- Config overrides via `dataclasses.replace()`, not manual field reconstruction

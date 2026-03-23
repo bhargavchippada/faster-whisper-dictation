@@ -11,7 +11,19 @@ import time
 
 log = logging.getLogger(__name__)
 
-PASTE_DELAY = float(os.environ.get("DICTATION_PASTE_DELAY", "0.15"))
+
+def _parse_paste_delay(value: str) -> float:
+    """Parse and validate PASTE_DELAY from environment."""
+    try:
+        delay = float(value)
+    except ValueError:
+        raise ValueError(f"DICTATION_PASTE_DELAY must be a number, got {value!r}") from None
+    if not (0.0 <= delay <= 10.0) or delay != delay:  # NaN check
+        raise ValueError(f"DICTATION_PASTE_DELAY must be 0.0-10.0, got {delay}")
+    return delay
+
+
+PASTE_DELAY = _parse_paste_delay(os.environ.get("DICTATION_PASTE_DELAY", "0.15"))
 _clipboard_lock = threading.Lock()
 
 
@@ -24,12 +36,15 @@ def _type_linux_x11(text: str) -> None:
     """Type via xdotool + xclip on X11."""
     prev = subprocess.run(
         ["xclip", "-selection", "clipboard", "-o"],
-        capture_output=True, text=True, check=False,
+        capture_output=True,
+        text=True,
+        check=False,
     ).stdout
 
     subprocess.run(
         ["xclip", "-selection", "clipboard"],
-        input=text.encode(), check=False,
+        input=text.encode(),
+        check=False,
     )
     subprocess.run(
         ["xdotool", "key", "--clearmodifiers", "ctrl+v"],
@@ -39,14 +54,18 @@ def _type_linux_x11(text: str) -> None:
 
     subprocess.run(
         ["xclip", "-selection", "clipboard"],
-        input=prev.encode(), check=False,
+        input=prev.encode(),
+        check=False,
     )
 
 
 def _type_linux_wayland(text: str) -> None:
     """Type via ydotool + wl-clipboard on Wayland."""
     prev = subprocess.run(
-        ["wl-paste"], capture_output=True, text=True, check=False,
+        ["wl-paste"],
+        capture_output=True,
+        text=True,
+        check=False,
     ).stdout
 
     subprocess.run(["wl-copy", "--", text], check=False)
@@ -62,7 +81,10 @@ def _type_linux_wayland(text: str) -> None:
 def _type_macos(text: str) -> None:
     """Type via pbcopy + AppleScript on macOS."""
     prev = subprocess.run(
-        ["pbpaste"], capture_output=True, text=True, check=False,
+        ["pbpaste"],
+        capture_output=True,
+        text=True,
+        check=False,
     ).stdout
 
     subprocess.run(["pbcopy"], input=text.encode(), check=False)
@@ -78,9 +100,6 @@ def _type_macos(text: str) -> None:
 def _type_windows(text: str) -> None:
     """Type via clipboard + keyboard simulation on Windows."""
     try:
-        import ctypes
-        import ctypes.wintypes
-
         # Save clipboard, set new text, paste, restore — all via Win32 API
         prev = _win_clipboard_get()
         _win_clipboard_set(text)
@@ -99,7 +118,9 @@ def _win_clipboard_get() -> str:
     user32 = ctypes.windll.user32
     kernel32 = ctypes.windll.kernel32
 
-    user32.OpenClipboard(0)
+    if not user32.OpenClipboard(0):
+        log.debug("Failed to open clipboard for reading")
+        return ""
     try:
         handle = user32.GetClipboardData(CF_UNICODETEXT)
         if not handle:
@@ -124,11 +145,19 @@ def _win_clipboard_set(text: str) -> None:
 
     encoded = text.encode("utf-16-le") + b"\x00\x00"
     handle = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(encoded))
+    if not handle:
+        raise RuntimeError("GlobalAlloc failed")
     ptr = kernel32.GlobalLock(handle)
+    if not ptr:
+        kernel32.GlobalFree(handle)
+        raise RuntimeError("GlobalLock failed")
     ctypes.memmove(ptr, encoded, len(encoded))
     kernel32.GlobalUnlock(handle)
 
-    user32.OpenClipboard(0)
+    if not user32.OpenClipboard(0):
+        log.debug("Failed to open clipboard for writing")
+        kernel32.GlobalFree(handle)
+        return
     try:
         user32.EmptyClipboard()
         user32.SetClipboardData(CF_UNICODETEXT, handle)
