@@ -835,3 +835,20 @@ class TestOnnxVAD:
         vad(np.zeros(512, dtype=np.float32), 16000)
 
         np.testing.assert_array_equal(vad._state, new_state)
+
+    def test_call_uses_requested_sample_rate(self):
+        """Test OnnxVAD forwards the caller-provided sample rate to ONNX."""
+        from whisper_dictation.vad import OnnxVAD
+
+        vad = OnnxVAD.__new__(OnnxVAD)
+        vad._state = np.zeros((2, 1, 128), dtype=np.float32)
+        vad._sr = np.array(16000, dtype=np.int64)
+
+        mock_session = MagicMock()
+        mock_session.run.return_value = [np.array([[0.4]]), vad._state]
+        vad.session = mock_session
+
+        vad(np.zeros(256, dtype=np.float32), 8000)
+
+        call_inputs = mock_session.run.call_args[0][1]
+        assert int(call_inputs["sr"]) == 8000

@@ -256,7 +256,7 @@ faster-whisper-dictation/
 │   ├── vad.py              # Silero VAD (ONNX, SHA-256 verified)
 │   ├── typer.py            # Platform-aware text input (clipboard + paste)
 │   └── notifier.py         # Cross-platform desktop notifications
-├── tests/                  # 307 tests, 100% coverage
+├── tests/                  # 326 tests, 100% coverage
 ├── .github/workflows/      # CI: lint + test on Python 3.10-3.14
 ├── docker-compose.yml      # GPU server
 ├── docker-compose.cpu.yml  # CPU server

@@ -150,7 +150,7 @@ class OnnxVAD:
         ort_inputs = {
             "input": audio,
             "state": self._state,
-            "sr": self._sr,
+            "sr": np.array(sr, dtype=np.int64) if int(self._sr) != sr else self._sr,
         }
         out, new_state = self.session.run(None, ort_inputs)
         self._state = new_state
@@ -226,8 +226,12 @@ class SpeechDetector:
         if audio.dtype == np.int16:
             audio = audio.astype(np.float32) / 32768.0
 
-        # Buffer incoming audio and process in chunk_size pieces
-        self._buffer = np.concatenate([self._buffer, audio.flatten()])
+        # Buffer incoming audio and process in chunk_size pieces.
+        incoming = audio.reshape(-1)
+        if self._buffer.size == 0:
+            self._buffer = incoming.copy()
+        elif incoming.size:
+            self._buffer = np.concatenate([self._buffer, incoming])
 
         completed_utterance = None
 

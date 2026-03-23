@@ -168,6 +168,18 @@ class TestAudioStream:
         assert call_kwargs["device"] == "My USB Microphone"
 
     @patch("whisper_dictation.audio.sd")
+    def test_start_with_numeric_string_device_uses_index(self, mock_sd):
+        mock_sd.InputStream.return_value = MagicMock()
+
+        cfg = AudioConfig(sample_rate=16000, channels=1, device="3")
+        stream = AudioStream(cfg, MagicMock())
+        stream.start()
+
+        call_kwargs = mock_sd.InputStream.call_args[1]
+        assert call_kwargs["device"] == 3
+        mock_sd.query_devices.assert_not_called()
+
+    @patch("whisper_dictation.audio.sd")
     def test_start_with_unmatched_device_warns(self, mock_sd, caplog):
         mock_sd.query_devices.return_value = [
             {"name": "Built-in Mic", "max_input_channels": 1},

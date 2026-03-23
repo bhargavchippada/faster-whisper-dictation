@@ -79,6 +79,11 @@ class AudioStream:
     def start(self) -> None:
         """Start capturing audio."""
         device = self.config.device
+        if isinstance(device, str):
+            stripped = device.strip()
+            if stripped.isdigit():
+                device = int(stripped)
+
         # Try to find device by name if string
         if isinstance(device, str):
             matched = False

@@ -33,7 +33,7 @@ src/whisper_dictation/
 - **ONNX by default**: VAD uses ONNX Runtime, not PyTorch, to keep the dependency footprint small.
 - **pynput + evdev**: pynput handles macOS/Windows/X11; evdev handles Linux Wayland where pynput fails. Callbacks fire outside the hotkey lock to prevent deadlocks.
 - **Non-blocking notifications**: `subprocess.Popen` (not `.run`) for Linux/macOS so notifications never block the daemon.
-- **No shell scripts**: Everything is Python. The legacy `scripts/` directory is from the pre-rewrite era.
+- **No shell scripts**: Everything is Python.
 
 ## Security Considerations
 
@@ -101,7 +101,7 @@ GitHub Actions runs on every push/PR to main:
 - Python 3.10, 3.11, 3.12, 3.13, 3.14 matrix
 - Lint with ruff
 - Tests with coverage gate (minimum 80%)
-- 307 tests, 100% coverage
+- 326 tests, 100% coverage
 
 ## Config Priority (highest to lowest)
 

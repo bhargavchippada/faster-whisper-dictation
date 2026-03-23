@@ -643,6 +643,31 @@ class TestCmdStart:
         handler(signal.SIGTERM, None)
         mock_daemon.request_stop.assert_called_once()
 
+    def test_start_cleans_up_pid_when_state_file_write_fails(self, tmp_path):
+        from whisper_dictation.config import Config
+
+        args = MagicMock()
+        args.config = None
+        args.mode = None
+        args.hotkey = None
+        args.engine = None
+        args.server_url = None
+        args.streaming = False
+
+        with (
+            patch("whisper_dictation.cli._read_pid", return_value=None),
+            patch("whisper_dictation.cli.load_config", return_value=Config()),
+            patch("whisper_dictation.cli._write_pid"),
+            patch("whisper_dictation.cli._cleanup_pid") as mock_cleanup,
+            patch("whisper_dictation.cli.CONFIG_DIR", tmp_path),
+            patch("whisper_dictation.cli.STATE_FILE", tmp_path / "state.json"),
+            patch("os.open", side_effect=OSError("disk full")),
+            pytest.raises(OSError, match="disk full"),
+        ):
+            cmd_start(args)
+
+        mock_cleanup.assert_called_once()
+
 
 # ---------------------------------------------------------------------------
 # cmd_transcribe
@@ -724,6 +749,7 @@ class TestCmdTranscribe:
         ):
             cmd_transcribe(_make_transcribe_args(file=str(wav_path)))
         mock_engine.transcribe.assert_called_once()
+        mock_engine.close.assert_called_once()
 
     def test_transcribe_with_record(self, capsys):
         import numpy as np
@@ -745,6 +771,7 @@ class TestCmdTranscribe:
 
         captured = capsys.readouterr()
         assert "recorded speech" in captured.out
+        mock_engine.close.assert_called_once()
 
     def test_transcribe_record_no_speech(self):
         import numpy as np
@@ -811,6 +838,7 @@ class TestCmdTranscribe:
             pytest.raises(SystemExit),
         ):
             cmd_transcribe(_make_transcribe_args(file=str(wav_path)))
+        mock_engine.close.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

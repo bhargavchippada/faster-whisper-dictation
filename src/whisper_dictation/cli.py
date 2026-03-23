@@ -137,42 +137,43 @@ def cmd_start(args: argparse.Namespace) -> None:
     )
     validate(config)
 
-    _write_pid()
-
-    # Write state for status command (restricted permissions for URL privacy)
-    # CONFIG_DIR already exists after _write_pid()
-    state_data = json.dumps(
-        {
-            "mode": config.hotkey.mode,
-            "hotkey": config.hotkey.binding,
-            "engine": config.engine.type,
-            "server_url": config.server.url,
-        }
-    )
-    fd = os.open(str(STATE_FILE), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    daemon = None
     try:
-        os.write(fd, state_data.encode())
-    finally:
-        os.close(fd)
+        _write_pid()
 
-    streaming = args.streaming
-    daemon = DictationDaemon(config, streaming=streaming)
+        # Write state for status command (restricted permissions for URL privacy)
+        # CONFIG_DIR already exists after _write_pid()
+        state_data = json.dumps(
+            {
+                "mode": config.hotkey.mode,
+                "hotkey": config.hotkey.binding,
+                "engine": config.engine.type,
+                "server_url": config.server.url,
+            }
+        )
+        fd = os.open(str(STATE_FILE), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, state_data.encode())
+        finally:
+            os.close(fd)
 
-    def _shutdown(sig: int, frame: object) -> None:
-        # Signal-safe: only set the event, actual cleanup in main thread
-        daemon.request_stop()
+        daemon = DictationDaemon(config, streaming=args.streaming)
 
-    signal.signal(signal.SIGTERM, _shutdown)
-    signal.signal(signal.SIGINT, _shutdown)
+        def _shutdown(sig: int, frame: object) -> None:
+            # Signal-safe: only set the event, actual cleanup in main thread
+            daemon.request_stop()
 
-    try:
+        signal.signal(signal.SIGTERM, _shutdown)
+        signal.signal(signal.SIGINT, _shutdown)
+
         daemon.start()
         daemon.wait()
     except RuntimeError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
     finally:
-        daemon.stop()
+        if daemon is not None:
+            daemon.stop()
         _cleanup_pid()
 
 
@@ -348,59 +349,61 @@ def cmd_transcribe(args: argparse.Namespace) -> None:
     from .engine import create_engine
 
     engine = create_engine(config)
+    try:
+        if args.file:
+            import wave
 
-    if args.file:
-        import wave
+            if not Path(args.file).exists():
+                print(f"File not found: {args.file}", file=sys.stderr)
+                sys.exit(1)
 
-        if not Path(args.file).exists():
-            print(f"File not found: {args.file}", file=sys.stderr)
-            sys.exit(1)
+            try:
+                with wave.open(args.file, "rb") as w:
+                    sr = w.getframerate()
+                    frames = w.readframes(w.getnframes())
+                    audio = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
+            except wave.Error as e:
+                print(f"Cannot read audio file (WAV format required): {e}", file=sys.stderr)
+                sys.exit(1)
 
-        try:
-            with wave.open(args.file, "rb") as w:
-                sr = w.getframerate()
-                frames = w.readframes(w.getnframes())
-                audio = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
-        except wave.Error as e:
-            print(f"Cannot read audio file (WAV format required): {e}", file=sys.stderr)
-            sys.exit(1)
+            text = engine.transcribe(audio, sr)
+            if text:
+                print(text)
+            else:
+                print("No speech detected.", file=sys.stderr)
+                sys.exit(1)
 
-        text = engine.transcribe(audio, sr)
-        if text:
-            print(text)
-        else:
-            print("No speech detected.", file=sys.stderr)
-            sys.exit(1)
+        elif args.record:
+            import sounddevice as sd
 
-    elif args.record:
-        import sounddevice as sd
-
-        duration = args.record
-        if duration <= 0 or duration > config.vad.max_speech_s:
-            print(
-                f"Recording duration must be 0-{config.vad.max_speech_s}s, got {duration}s",
-                file=sys.stderr,
+            duration = args.record
+            if duration <= 0 or duration > config.vad.max_speech_s:
+                print(
+                    f"Recording duration must be 0-{config.vad.max_speech_s}s, got {duration}s",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            print(f"Recording {duration}s...", file=sys.stderr)
+            audio = sd.rec(
+                int(duration * config.audio.sample_rate),
+                samplerate=config.audio.sample_rate,
+                channels=1,
+                dtype="float32",
             )
-            sys.exit(1)
-        print(f"Recording {duration}s...", file=sys.stderr)
-        audio = sd.rec(
-            int(duration * config.audio.sample_rate),
-            samplerate=config.audio.sample_rate,
-            channels=1,
-            dtype="float32",
-        )
-        sd.wait()
-        print("Transcribing...", file=sys.stderr)
+            sd.wait()
+            print("Transcribing...", file=sys.stderr)
 
-        text = engine.transcribe(audio.flatten(), config.audio.sample_rate)
-        if text:
-            print(text)
+            text = engine.transcribe(audio.flatten(), config.audio.sample_rate)
+            if text:
+                print(text)
+            else:
+                print("No speech detected.", file=sys.stderr)
+                sys.exit(1)
         else:
-            print("No speech detected.", file=sys.stderr)
+            print("Provide --file or --record", file=sys.stderr)
             sys.exit(1)
-    else:
-        print("Provide --file or --record", file=sys.stderr)
-        sys.exit(1)
+    finally:
+        engine.close()
 
 
 def main() -> None:
