@@ -678,8 +678,8 @@ class TestCmdStart:
 
         mock_cleanup.assert_called_once()
 
-    def test_start_background_on_windows_exits(self, tmp_path, capsys):
-        """--background on Windows should print error and exit."""
+    def test_start_background_no_fork_exits(self, tmp_path, capsys):
+        """--background on platforms without os.fork should print error and exit."""
         from whisper_dictation.config import Config
 
         args = MagicMock()
@@ -692,18 +692,21 @@ class TestCmdStart:
         args.background = True
         args.verbose = False
 
-        import whisper_dictation.cli as cli_mod
-
-        with (
-            patch("whisper_dictation.cli._read_pid", return_value=None),
-            patch("whisper_dictation.cli.load_config", return_value=Config()),
-            patch.object(cli_mod.sys, "platform", "win32"),
-            pytest.raises(SystemExit),
-        ):
-            cmd_start(args)
+        # Temporarily remove os.fork to simulate Windows/WASI
+        original_fork = os.fork
+        try:
+            del os.fork
+            with (
+                patch("whisper_dictation.cli._read_pid", return_value=None),
+                patch("whisper_dictation.cli.load_config", return_value=Config()),
+                pytest.raises(SystemExit),
+            ):
+                cmd_start(args)
+        finally:
+            os.fork = original_fork
 
         captured = capsys.readouterr()
-        assert "--background is not supported on Windows" in captured.err
+        assert "--background is not supported" in captured.err
 
     def test_start_background_calls_daemonize(self, tmp_path):
         """--background on Unix should call _daemonize and re-init logging."""
@@ -730,14 +733,11 @@ class TestCmdStart:
             patch("whisper_dictation.cli.CONFIG_DIR", tmp_path),
             patch("whisper_dictation.cli.STATE_FILE", tmp_path / "state.json"),
             patch("signal.signal"),
-            patch("sys.platform", "linux"),
             patch("whisper_dictation.cli._daemonize") as mock_daemonize,
-            patch("whisper_dictation.cli._setup_logging") as mock_logging,
         ):
             cmd_start(args)
 
         mock_daemonize.assert_called_once()
-        mock_logging.assert_called_once_with(False)
         mock_daemon.start.assert_called_once()
 
     def test_start_foreground_does_not_daemonize(self, tmp_path):

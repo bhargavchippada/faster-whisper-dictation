@@ -190,16 +190,14 @@ def cmd_start(args: argparse.Namespace) -> None:
     )
     validate(config)
 
-    background = getattr(args, "background", False)
-
-    if background:
-        if sys.platform == "win32":
-            print("--background is not supported on Windows.", file=sys.stderr)
+    if args.background:
+        if not hasattr(os, "fork"):
+            print("--background is not supported on this platform.", file=sys.stderr)
             sys.exit(1)
-        # Daemonize before writing PID so the PID file contains the child's PID
+        # Daemonize before writing PID so the PID file contains the child's PID.
+        # After _daemonize(), stderr fd 2 points to LOG_FILE, so the existing
+        # StreamHandler from _setup_logging() automatically writes to the log.
         _daemonize()
-        # Re-init logging to write to the log file fd (stderr was redirected)
-        _setup_logging(args.verbose)
 
     daemon = None
     try:
