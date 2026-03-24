@@ -46,8 +46,13 @@ WhisperLiveKit is pip-installable and serves as the WebSocket backend (default U
 
 ```bash
 pip install whisperlivekit
-wlk --model large-v3 --language en --pcm-input
+
+# CUDA 12 required — if libcublas.so.12 is not in default path:
+LD_LIBRARY_PATH=/usr/local/lib/ollama/cuda_v12:$LD_LIBRARY_PATH \
+  wlk serve --model large-v3 --language en --pcm-input
 ```
+
+**Note:** WhisperLiveKit requires CUDA 12 (`libcublas.so.12`). If your system has CUDA 13, set `LD_LIBRARY_PATH` to a directory containing CUDA 12 libs (e.g. from Ollama). Without this, the model silently produces empty transcriptions.
 
 ## Security Considerations
 
@@ -69,6 +74,10 @@ wlk --model large-v3 --language en --pcm-input
 - **WS batch segment cap**: `_MAX_BATCH_SEGMENTS = 1000` prevents unbounded `_batch_collected` list growth.
 - **WS close() unblocks waiters**: `close()` sets `_flush_done` to prevent `wait_for_completion()` from hanging indefinitely.
 - **WS engine snapshot pattern**: `_on_audio_chunk` snapshots `ws_engine = self._ws_engine` before use to prevent race with `_on_deactivate` nulling the reference.
+- **Batch audio buffer cap**: `_max_batch_chunks` (derived from `max_speech_s / 0.032`) prevents unbounded memory growth from held hotkeys. Chunks beyond the cap are silently dropped.
+- **VAD model download size limit**: `_MAX_MODEL_BYTES = 50MB` enforced via streaming download. Prevents memory exhaustion from malicious `DICTATION_VAD_MODEL_URL` responses.
+- **VAD cache directory permissions**: Created with `mode=0o700` to prevent other users from replacing the cached model.
+- **Evdev device removal handling**: `OSError` during `dev.read()` removes the device from the poll list and closes it, preventing CPU-saturating busy-loops when USB keyboards are unplugged.
 
 ## Daemon Management
 
@@ -116,7 +125,7 @@ uv build --clear --no-cache
 - Use `unittest.mock.patch` for all external subprocess calls and hardware interfaces.
 - Target: 100% test coverage. All new code must include tests.
 - Tests must never hang — mock `wait_for_completion()` in batch tests with `patch.object(engine, 'wait_for_completion', return_value=True)`. See `tests/test_engine_whisperlivekit.py` for established patterns.
-- Current status: 478 tests, 100% line coverage, runs in ~2s.
+- Current status: 480 tests, 99% line coverage (2 trivial defensive lines), runs in ~2s.
 
 ## CI
 
@@ -124,7 +133,7 @@ GitHub Actions runs on every push/PR to main:
 - Python 3.10, 3.11, 3.12, 3.13, 3.14 matrix
 - Lint with ruff
 - Tests with coverage gate (minimum 80%)
-- 478 tests, 100% coverage
+- 480 tests, 99% coverage
 
 ## Performance Notes
 

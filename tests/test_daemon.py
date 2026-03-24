@@ -668,7 +668,7 @@ class TestWebSocketStreaming:
     @patch("whisper_dictation.daemon.AudioStream")
     @patch("whisper_dictation.daemon.create_engine")
     def test_ws_activate_connect_failure(self, mock_create, mock_audio_cls, mock_notify):
-        """WS streaming: failed connect resets recording state and notifies."""
+        """WS streaming: failed connect cleans up engine, resets state, and notifies."""
         mock_create.return_value = MagicMock()
         mock_audio_cls.return_value = MagicMock()
         daemon = DictationDaemon(Config(), streaming=True)
@@ -680,6 +680,7 @@ class TestWebSocketStreaming:
             daemon._on_activate()
             assert daemon._recording is False
             assert daemon._ws_engine is None
+            mock_ws.close.assert_called_once()  # engine must be cleaned up
             mock_notify.assert_any_call("Error", "WebSocket connection failed")
 
     @patch("whisper_dictation.daemon.create_engine")

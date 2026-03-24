@@ -128,11 +128,8 @@ class WhisperLiveKitEngine:
         self._flush_done = threading.Event()
         self._eoa_sent = False
 
-        # Lock protects _emitted_count and _batch_collected which are
-        # shared between the caller thread and the receiver thread.
+        # Lock protects _latest_full_text shared between caller and receiver.
         self._seg_lock = threading.Lock()
-        self._emitted_count = 0
-        self._batch_collected: list[str] | None = None
         self._latest_full_text: str = ""
 
     @property
@@ -154,8 +151,6 @@ class WhisperLiveKitEngine:
             except queue.Empty:
                 break
         with self._seg_lock:
-            self._emitted_count = 0
-            self._batch_collected = None
             self._latest_full_text = ""
             self._eoa_sent = False
         self._uid = str(uuid.uuid4())
@@ -265,16 +260,12 @@ class WhisperLiveKitEngine:
         try:
             self.connect()
 
-            # Set AFTER connect() which resets _batch_collected to None
-            with self._seg_lock:
-                self._batch_collected = []
-
             # Send audio in chunks (blocking put to avoid drops)
             for i in range(0, len(audio), _BATCH_CHUNK_SAMPLES):
                 chunk = audio[i: i + _BATCH_CHUNK_SAMPLES]
                 self._send_audio_blocking(chunk)
 
-            # Set _eoa_sent BEFORE enqueue so receiver sees it immediately
+            # Send end-of-audio and wait for ready_to_stop
             self._flush_done.clear()
             with self._seg_lock:
                 self._eoa_sent = True
@@ -290,18 +281,12 @@ class WhisperLiveKitEngine:
             if not self.wait_for_completion(timeout=timeout):
                 log.warning("Batch transcription timed out after %.0fs", timeout)
 
-            with self._seg_lock:
-                collected = list(self._batch_collected or [])
-                fallback = self._latest_full_text
-            text = " ".join(collected).strip()
-            return text if text else fallback
+            return self.get_pending_text()
         except Exception:
             log.error("Batch WLK transcription failed", exc_info=True)
             raise
         finally:
             self.close()
-            with self._seg_lock:
-                self._batch_collected = None
 
     def close(self) -> None:
         """Close WebSocket connection and stop threads."""
@@ -351,14 +336,12 @@ class WhisperLiveKitEngine:
             log.debug("WLK %s thread was never started", name)
 
     def get_pending_text(self) -> str:
-        """Return unemitted partial text, if any.
+        """Return the latest accumulated transcription text.
 
-        Returns the full text (lines + buffer) only when no completed
-        lines have been emitted yet. Prevents double-typing.
+        WhisperLiveKit updates lines in-place, so this always returns
+        the most recent full text. Text is emitted once on deactivation.
         """
         with self._seg_lock:
-            if self._emitted_count > 0:
-                return ""
             return self._latest_full_text
 
     def is_available(self) -> bool:
@@ -426,7 +409,7 @@ class WhisperLiveKitEngine:
                     continue
 
                 if isinstance(raw, str) and len(raw) > _MAX_MESSAGE_BYTES:
-                    log.warning("WLK message too large (%d bytes), skipping", len(raw))
+                    log.warning("WLK message too large, skipping")
                     continue
 
                 try:
@@ -485,8 +468,13 @@ class WhisperLiveKitEngine:
     ) -> None:
         """Process WhisperLiveKit transcription response.
 
+        WhisperLiveKit updates lines in-place (the same line grows as
+        transcription progresses) rather than appending new completed
+        segments. We track the full text and emit it on flush/close.
+
         Args:
-            lines: List of completed line dicts, each with "text" key.
+            lines: List of line dicts, each with "text" key. Typically
+                one line that keeps growing.
             buffer_text: Current partial/in-progress transcription text.
         """
         valid_lines = [ln for ln in lines if isinstance(ln, dict)]
@@ -498,25 +486,5 @@ class WhisperLiveKitEngine:
             all_text_parts.append(buffer_text.strip())
         full_text = " ".join(all_text_parts)
 
-        # Collect texts to emit outside the lock (on_text and log may be slow)
-        texts_to_emit: list[str] = []
-
         with self._seg_lock:
-            new_lines = valid_lines[self._emitted_count:]
-            self._emitted_count = max(self._emitted_count, len(valid_lines))
-            collected = self._batch_collected  # local for type narrowing
             self._latest_full_text = full_text
-
-            for ln in new_lines:
-                text = ln.get("text", "").strip()
-                if text:
-                    if collected is not None:
-                        if len(collected) < _MAX_BATCH_LINES:
-                            collected.append(text)
-                    else:
-                        texts_to_emit.append(text)
-
-        # Emit streaming callbacks and log outside the lock
-        for text in texts_to_emit:
-            log.debug("WLK text (line): %s", text[:80])
-            self._on_text(text)

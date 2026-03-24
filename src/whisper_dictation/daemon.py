@@ -172,6 +172,7 @@ class DictationDaemon:
                 ws_engine.connect()
             except Exception:
                 log.error("WebSocket connection failed", exc_info=True)
+                ws_engine.close()
                 with self._lock:
                     self._recording = False
                 notify("Error", "WebSocket connection failed")

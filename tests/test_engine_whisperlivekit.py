@@ -204,10 +204,8 @@ class TestConnect:
         engine = WhisperLiveKitEngine(
             server_url="http://localhost:8000", language="en",
         )
-        engine._emitted_count = 5
         engine._latest_full_text = "old"
         engine.connect()
-        assert engine._emitted_count == 0
         assert engine._latest_full_text == ""
         engine.close()
 
@@ -496,15 +494,14 @@ class TestHandleMessage:
         assert not engine._flush_done.is_set()
 
     def test_transcription_with_lines(self):
-        cb = MagicMock()
         engine = WhisperLiveKitEngine(
-            server_url="http://localhost:8000",            language="en", on_text=cb,
+            server_url="http://localhost:8000", language="en",
         )
         engine._handle_message({
             "lines": [{"text": "hello world", "start": "0:00:00.00", "end": "0:00:01.00"}],
             "buffer_transcription": "",
         })
-        cb.assert_called_once_with("hello world")
+        assert engine._latest_full_text == "hello world"
 
     def test_transcription_with_buffer_only(self):
         engine = WhisperLiveKitEngine(
@@ -534,42 +531,36 @@ class TestHandleMessage:
 
 
 class TestProcessResponse:
-    def test_emits_new_completed_lines(self):
-        cb = MagicMock()
+    def test_tracks_full_text_from_lines(self):
         engine = WhisperLiveKitEngine(
-            server_url="http://localhost:8000",            language="en", on_text=cb,
+            server_url="http://localhost:8000", language="en",
         )
         engine._process_response(
             lines=[{"text": "hello"}, {"text": "world"}],
             buffer_text="",
         )
-        assert cb.call_count == 2
-        cb.assert_any_call("hello")
-        cb.assert_any_call("world")
-        assert engine._emitted_count == 2
+        assert engine._latest_full_text == "hello world"
 
-    def test_does_not_re_emit(self):
-        cb = MagicMock()
+    def test_overwrites_full_text_on_each_call(self):
         engine = WhisperLiveKitEngine(
-            server_url="http://localhost:8000",            language="en", on_text=cb,
+            server_url="http://localhost:8000", language="en",
         )
         engine._process_response(lines=[{"text": "hello"}], buffer_text="")
-        cb.reset_mock()
+        assert engine._latest_full_text == "hello"
         engine._process_response(lines=[{"text": "hello"}], buffer_text="partial")
-        cb.assert_not_called()
+        assert engine._latest_full_text == "hello partial"
 
-    def test_emits_only_new_lines(self):
-        cb = MagicMock()
+    def test_updates_full_text_on_new_lines(self):
         engine = WhisperLiveKitEngine(
-            server_url="http://localhost:8000",            language="en", on_text=cb,
+            server_url="http://localhost:8000", language="en",
         )
         engine._process_response(lines=[{"text": "first"}], buffer_text="")
-        cb.reset_mock()
+        assert engine._latest_full_text == "first"
         engine._process_response(
             lines=[{"text": "first"}, {"text": "second"}],
             buffer_text="",
         )
-        cb.assert_called_once_with("second")
+        assert engine._latest_full_text == "first second"
 
     def test_tracks_full_text_with_buffer(self):
         engine = WhisperLiveKitEngine(
@@ -581,26 +572,20 @@ class TestProcessResponse:
         )
         assert engine._latest_full_text == "hello world"
 
-    def test_batch_mode_collects(self):
+    def test_replaces_full_text_each_call(self):
         engine = WhisperLiveKitEngine(
             server_url="http://localhost:8000", language="en",
         )
-        with engine._seg_lock:
-            engine._batch_collected = []
         engine._process_response(
-            lines=[{"text": "hello"}, {"text": "world"}],
+            lines=[{"text": "hello"}],
             buffer_text="",
         )
-        assert engine._batch_collected == ["hello", "world"]
-
-    def test_batch_mode_max_lines(self):
-        engine = WhisperLiveKitEngine(
-            server_url="http://localhost:8000", language="en",
+        assert engine._latest_full_text == "hello"
+        engine._process_response(
+            lines=[{"text": "hello"}, {"text": "world"}],
+            buffer_text="partial",
         )
-        with engine._seg_lock:
-            engine._batch_collected = ["x"] * 1000
-        engine._process_response(lines=[{"text": "overflow"}], buffer_text="")
-        assert len(engine._batch_collected) == 1000  # not 1001
+        assert engine._latest_full_text == "hello world partial"
 
     def test_skips_empty_text_lines(self):
         cb = MagicMock()
@@ -632,12 +617,10 @@ class TestGetPendingText:
         engine._latest_full_text = "pending"
         assert engine.get_pending_text() == "pending"
 
-    def test_returns_empty_when_already_emitted(self):
+    def test_returns_empty_when_no_text(self):
         engine = WhisperLiveKitEngine(
             server_url="http://localhost:8000", language="en",
         )
-        engine._emitted_count = 1
-        engine._latest_full_text = "already sent"
         assert engine.get_pending_text() == ""
 
 
@@ -780,7 +763,7 @@ class TestIsAvailable:
 
 class TestTranscribeBatch:
     def test_returns_transcribed_text(self):
-        """Batch mode: collects completed segments and returns text."""
+        """Batch mode: returns latest_full_text via get_pending_text()."""
         engine = WhisperLiveKitEngine(
             server_url="http://localhost:8000", language="en",
         )
@@ -790,8 +773,7 @@ class TestTranscribeBatch:
 
         def fake_wait(timeout=5.0):
             with engine._seg_lock:
-                if engine._batch_collected is not None:
-                    engine._batch_collected.append("hello world")
+                engine._latest_full_text = "hello world"
             return True
 
         with patch.object(engine, "connect", side_effect=fake_connect):
@@ -835,8 +817,8 @@ class TestTranscribeBatch:
         with pytest.raises(ConnectionRefusedError):
             engine.transcribe_batch(np.zeros(512, dtype=np.float32))
 
-    def test_cleans_up_batch_collected(self):
-        """Batch mode: _batch_collected is cleaned up after transcription."""
+    def test_close_called_in_finally(self):
+        """Batch mode: close() is always called after transcription."""
         engine = WhisperLiveKitEngine(
             server_url="http://localhost:8000", language="en",
         )
@@ -846,10 +828,9 @@ class TestTranscribeBatch:
 
         with patch.object(engine, "connect", side_effect=fake_connect):
             with patch.object(engine, "wait_for_completion", return_value=True):
-                with patch.object(engine, "close"):
+                with patch.object(engine, "close") as mock_close:
                     engine.transcribe_batch(np.zeros(512, dtype=np.float32))
-
-        assert engine._batch_collected is None
+                    mock_close.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
