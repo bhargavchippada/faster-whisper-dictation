@@ -486,7 +486,7 @@ class TestLoadOnnxModel:
         vad_mod._model = None
 
         mock_response = MagicMock()
-        mock_response.read.return_value = b"model data"
+        mock_response.read.side_effect = [b"model data", b""]
         mock_response.__enter__ = MagicMock(return_value=mock_response)
         mock_response.__exit__ = MagicMock(return_value=False)
 
@@ -513,7 +513,7 @@ class TestLoadOnnxModel:
         vad_mod._VERIFY_HASH = True
 
         mock_response = MagicMock()
-        mock_response.read.return_value = b"model data"
+        mock_response.read.side_effect = [b"model data", b""]
         mock_response.__enter__ = MagicMock(return_value=mock_response)
         mock_response.__exit__ = MagicMock(return_value=False)
 
@@ -539,7 +539,7 @@ class TestLoadOnnxModel:
         vad_mod._model = None
 
         mock_response = MagicMock()
-        mock_response.read.return_value = b"fake model data"
+        mock_response.read.side_effect = [b"fake model data", b""]
         mock_response.__enter__ = MagicMock(return_value=mock_response)
         mock_response.__exit__ = MagicMock(return_value=False)
 
@@ -568,7 +568,7 @@ class TestLoadOnnxModel:
         vad_mod._VERIFY_HASH = True
 
         mock_response = MagicMock()
-        mock_response.read.return_value = b"bad model data"
+        mock_response.read.side_effect = [b"bad model data", b""]
         mock_response.__enter__ = MagicMock(return_value=mock_response)
         mock_response.__exit__ = MagicMock(return_value=False)
 
@@ -616,6 +616,33 @@ class TestLoadOnnxModel:
             assert not tmp_file.exists()
             # Cache file should not exist
             assert not (tmp_path / "silero_vad.onnx").exists()
+        finally:
+            vad_mod._model = original_model
+
+    def test_load_onnx_model_rejects_oversized_download(self, tmp_path):
+        """Test download is rejected when response exceeds size limit."""
+        import whisper_dictation.vad as vad_mod
+
+        original_model = vad_mod._model
+        vad_mod._model = None
+
+        # Return a chunk bigger than the 50 MB limit
+        big_chunk = b"x" * (50 * 1024 * 1024 + 1)
+        mock_response = MagicMock()
+        mock_response.read.side_effect = [big_chunk]
+        mock_response.__enter__ = MagicMock(return_value=mock_response)
+        mock_response.__exit__ = MagicMock(return_value=False)
+
+        try:
+            with (
+                patch("platformdirs.user_cache_dir", return_value=str(tmp_path)),
+                patch("urllib.request.urlopen", return_value=mock_response),
+            ):
+                with pytest.raises(RuntimeError, match="exceeds.*byte limit"):
+                    vad_mod._load_onnx_model()
+
+            # Temp file should be cleaned up
+            assert not (tmp_path / "silero_vad.tmp").exists()
         finally:
             vad_mod._model = original_model
 

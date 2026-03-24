@@ -467,6 +467,11 @@ class WhisperLiveKitEngine:
         lines = msg.get("lines")
         buffer_text = msg.get("buffer_transcription")
         if isinstance(lines, list) or isinstance(buffer_text, str):
+            log.debug(
+                "WLK response: lines=%d, buffer=%r",
+                len(lines) if isinstance(lines, list) else 0,
+                (buffer_text[:80] if isinstance(buffer_text, str) else ""),
+            )
             self._process_response(
                 lines=lines if isinstance(lines, list) else [],
                 buffer_text=buffer_text if isinstance(buffer_text, str) else "",

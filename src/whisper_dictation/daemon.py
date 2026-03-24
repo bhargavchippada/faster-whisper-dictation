@@ -54,6 +54,9 @@ class DictationDaemon:
         self._stop_event = threading.Event()
         self._recording = False
         self._recorded_chunks: list[np.ndarray] = []
+        # Cap batch audio buffer to prevent unbounded memory growth.
+        # At 32ms blocks: 90s max → 2812 chunks (~5.6 MB at 16kHz float32).
+        self._max_batch_chunks = int(config.vad.max_speech_s / 0.032)
         self._lock = threading.Lock()
         self._transcribe_pool = ThreadPoolExecutor(max_workers=1)
 
@@ -82,6 +85,8 @@ class DictationDaemon:
             self._on_audio_chunk_streaming(audio)
         else:
             with self._lock:
+                if len(self._recorded_chunks) >= self._max_batch_chunks:
+                    return  # buffer full, drop chunk silently
                 self._recorded_chunks.append(audio.copy())
 
     def _on_audio_chunk_streaming(self, audio: np.ndarray) -> None:

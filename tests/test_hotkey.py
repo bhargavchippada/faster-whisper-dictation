@@ -906,7 +906,7 @@ class TestEvdevLoop:
         activate.assert_not_called()
 
     def test_evdev_loop_read_error_handled(self):
-        """Test evdev loop handles read errors gracefully."""
+        """Test evdev loop handles non-OSError read errors gracefully."""
         listener = HotkeyListener("alt+v", "toggle", MagicMock(), MagicMock())
 
         mock_evdev, mock_ecodes = self._make_mock_evdev()
@@ -922,7 +922,8 @@ class TestEvdevLoop:
         mock_evdev.list_devices.return_value = ["/dev/input/event0"]
         mock_evdev.InputDevice.return_value = mock_dev
 
-        mock_dev.read.side_effect = OSError("device error")
+        # Non-OSError keeps device in list (generic exception path)
+        mock_dev.read.side_effect = ValueError("unexpected")
 
         call_count = [0]
 
@@ -943,6 +944,41 @@ class TestEvdevLoop:
                 listener._evdev_loop()
             except KeyboardInterrupt:
                 pass
+
+    def test_evdev_loop_device_removed_on_oserror(self):
+        """Test evdev loop removes device and returns when last device raises OSError."""
+        listener = HotkeyListener("alt+v", "toggle", MagicMock(), MagicMock())
+
+        mock_evdev, mock_ecodes = self._make_mock_evdev()
+
+        KEY_V = mock_ecodes.KEY_V
+
+        mock_dev = MagicMock()
+        caps = {mock_ecodes.EV_KEY: [KEY_V]}
+        mock_dev.capabilities.return_value = caps
+        mock_dev.name = "Test Keyboard"
+        mock_dev.path = "/dev/input/event0"
+
+        mock_evdev.list_devices.return_value = ["/dev/input/event0"]
+        mock_evdev.InputDevice.return_value = mock_dev
+
+        mock_dev.read.side_effect = OSError("device unplugged")
+
+        def mock_select(rlist, wlist, xlist, timeout):
+            return [mock_dev], [], []
+
+        with (
+            patch.dict(
+                "sys.modules",
+                {"evdev": mock_evdev, "evdev.ecodes": mock_ecodes, "select": MagicMock()},
+            ),
+            patch("select.select", side_effect=mock_select),
+        ):
+            # Should return cleanly when last device is removed
+            listener._evdev_loop()
+
+        # Device should have been closed
+        mock_dev.close.assert_called_once()
 
     def test_evdev_loop_device_without_target_key_skipped(self):
         """Test evdev skips devices that don't have the target key."""

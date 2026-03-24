@@ -336,6 +336,16 @@ class HotkeyListener:
                                 if not mods_held:
                                     self._handle_release()
 
+                    except OSError:
+                        log.warning("evdev device removed: %s", dev.path)
+                        devices.remove(dev)
+                        try:
+                            dev.close()
+                        except Exception:
+                            pass
+                        if not devices:
+                            log.error("All input devices lost")
+                            return
                     except Exception:
                         log.debug("evdev read error", exc_info=True)
         finally:

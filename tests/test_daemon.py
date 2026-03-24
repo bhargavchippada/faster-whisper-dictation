@@ -492,6 +492,23 @@ class TestOnAudioChunk:
             # Should not raise
             daemon._on_audio_chunk(np.zeros(512, dtype=np.float32))
 
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_batch_buffer_cap_drops_excess_chunks(self, mock_create):
+        """Batch mode: chunks beyond _max_batch_chunks are silently dropped."""
+        mock_create.return_value = MagicMock()
+        from whisper_dictation.config import VADConfig
+
+        config = Config(vad=VADConfig(max_speech_s=0.064))  # 2 chunks at 32ms
+        daemon = DictationDaemon(config)
+        daemon._recording = True
+
+        assert daemon._max_batch_chunks == 2
+
+        for _ in range(5):
+            daemon._on_audio_chunk(np.zeros(512, dtype=np.float32))
+
+        assert len(daemon._recorded_chunks) == 2
+
 
 # ---------------------------------------------------------------------------
 # _transcribe_and_type
