@@ -821,9 +821,11 @@ class TestMaybeFlushPendingWord:
         engine = WhisperLiveKitEngine(
             server_url="http://localhost:8000", language="en",
         )
+        # Set both stable and full text so the guard path is realistic
         engine._latest_full_text = "pending"
+        engine._last_stable_text = "pending"
         engine._last_stable_change = time.monotonic() - 2.0
-        engine._maybe_flush_pending_word()  # should not raise
+        engine._maybe_flush_pending_word()  # early return: _has_on_text is False
         assert engine._pending_word_flushed is False
 
     def test_noop_when_no_text_received(self):
@@ -846,9 +848,9 @@ class TestMaybeFlushPendingWord:
         )
         cb.reset_mock()  # "hello world" emitted, "foo" pending
 
-        # Manually advance cursor to end (simulate all text emitted)
+        # Manually advance cursor to end of stable text (simulate all emitted)
         with engine._seg_lock:
-            engine._emitted_len = len(engine._latest_full_text)
+            engine._emitted_len = len(engine._last_stable_text)
             engine._last_stable_change = time.monotonic() - 2.0
 
         engine._maybe_flush_pending_word()

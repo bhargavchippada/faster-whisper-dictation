@@ -134,6 +134,7 @@ class WhisperLiveKitEngine:
         self._latest_full_text: str = ""
         self._emitted_len: int = 0  # chars already streamed via on_text
         self._streamed_stable_text: str = ""
+        self._last_stable_text: str = ""  # full stable text from most recent response
         self._last_stable_change: float = 0.0  # monotonic time of last text growth
         self._pending_word_flushed: bool = False  # True if trailing word was time-flushed
 
@@ -159,6 +160,7 @@ class WhisperLiveKitEngine:
             self._latest_full_text = ""
             self._emitted_len = 0
             self._streamed_stable_text = ""
+            self._last_stable_text = ""
             self._last_stable_change = 0.0
             self._pending_word_flushed = False
             self._eoa_sent = False
@@ -434,6 +436,10 @@ class WhisperLiveKitEngine:
                     self._handle_message(msg)
                 except Exception:
                     log.warning("Error handling WLK message", exc_info=True)
+
+                # Check after every message — WLK sends continuously so
+                # the TimeoutError path rarely fires.
+                self._maybe_flush_pending_word()
         finally:
             # Signal callers so they don't hang waiting for a dead connection
             self._stop_event.set()
@@ -461,13 +467,15 @@ class WhisperLiveKitEngine:
             elapsed = time.monotonic() - self._last_stable_change
             if elapsed < self._WORD_FLUSH_TIMEOUT_S:
                 return
-            # Check for unemitted text beyond the cursor
-            full = self._latest_full_text
-            if self._emitted_len < len(full):
-                new_text = full[self._emitted_len:].strip()
+            # Flush only from stable text (lines), not buffer_transcription.
+            # _last_stable_text has the full stable text from the most recent
+            # response; _emitted_len is the cursor within it.
+            stable = self._last_stable_text
+            if self._emitted_len < len(stable):
+                new_text = stable[self._emitted_len:].strip()
                 if new_text:
-                    self._emitted_len = len(full)
-                    self._streamed_stable_text = full
+                    self._emitted_len = len(stable)
+                    self._streamed_stable_text = stable
                     self._pending_word_flushed = True
         if new_text:
             log.debug("WLK time-flushed trailing word: %d chars", len(new_text))
@@ -557,18 +565,24 @@ class WhisperLiveKitEngine:
         # typed, so we suppress that delta and resync the cursor.
         new_text: str = ""
         with self._seg_lock:
+            # Compare stable text (not full_text which includes buffer).
+            # Buffer churn would reset the timer continuously, preventing
+            # the 1.5s word flush from ever firing.
+            stable_changed = stable_text != self._last_stable_text
             self._latest_full_text = full_text
+            self._last_stable_text = stable_text
             if not self._has_on_text:
                 return
+
+            # Only reset the time-flush timer when stable text changes.
+            if stable_changed:
+                self._last_stable_change = time.monotonic()
+                self._pending_word_flushed = False
 
             prev = self._streamed_stable_text
             if stable_text.startswith(prev):
                 # Append-only growth — emit complete words from the suffix
                 candidate = stable_text[len(prev):]
-                if candidate:
-                    # Text grew — record timestamp for time-based flush
-                    self._last_stable_change = time.monotonic()
-                    self._pending_word_flushed = False
                 last_space = candidate.rfind(" ")
                 if last_space > 0:
                     emit_chunk = candidate[:last_space].strip()

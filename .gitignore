@@ -46,3 +46,7 @@ Thumbs.db
 
 # VAD model cache
 silero_vad.onnx
+
+# Ralph agent artifacts
+.ralph/
+.ralphrc
