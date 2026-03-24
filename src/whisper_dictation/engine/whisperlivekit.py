@@ -377,62 +377,72 @@ class WhisperLiveKitEngine:
 
     def _sender_loop(self) -> None:
         """Send queued audio frames to WebSocket."""
-        while not self._stop_event.is_set():
-            try:
-                data = self._send_queue.get(timeout=0.1)
-            except queue.Empty:
-                continue
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    data = self._send_queue.get(timeout=0.1)
+                except queue.Empty:
+                    continue
 
-            if data is None:
-                break
+                if data is None:
+                    break
 
-            ws = self._ws
-            if ws is None:
-                break
+                ws = self._ws
+                if ws is None:
+                    break
 
-            try:
-                if data is _END_SENTINEL:
-                    ws.send(b"")  # WhisperLiveKit EOA = empty frame
-                else:
-                    ws.send(data)
-            except Exception:
-                log.debug("WebSocket send failed", exc_info=True)
-                break
+                try:
+                    if data is _END_SENTINEL:
+                        ws.send(b"")  # WhisperLiveKit EOA = empty frame
+                    else:
+                        ws.send(data)
+                except Exception:
+                    log.debug("WebSocket send failed", exc_info=True)
+                    break
+        finally:
+            # Signal callers so they don't hang waiting for a dead connection
+            self._stop_event.set()
+            self._flush_done.set()
 
     def _receiver_loop(self) -> None:
         """Receive JSON messages from WhisperLiveKit and dispatch."""
-        while not self._stop_event.is_set():
-            ws = self._ws
-            if ws is None:
-                break
+        try:
+            while not self._stop_event.is_set():
+                ws = self._ws
+                if ws is None:
+                    break
 
-            try:
-                raw = ws.recv(timeout=0.5)
-            except TimeoutError:
-                continue
-            except Exception:
-                if not self._stop_event.is_set():
-                    log.debug("WebSocket recv error", exc_info=True)
-                break
+                try:
+                    raw = ws.recv(timeout=0.5)
+                except TimeoutError:
+                    continue
+                except Exception:
+                    if not self._stop_event.is_set():
+                        log.debug("WebSocket recv error", exc_info=True)
+                    break
 
-            if isinstance(raw, bytes):
-                log.debug("WLK binary frame ignored (%d bytes)", len(raw))
-                continue
+                if isinstance(raw, bytes):
+                    log.debug("WLK binary frame ignored (%d bytes)", len(raw))
+                    continue
 
-            if isinstance(raw, str) and len(raw) > _MAX_MESSAGE_BYTES:
-                log.warning("WLK message too large (%d bytes), skipping", len(raw))
-                continue
+                if isinstance(raw, str) and len(raw) > _MAX_MESSAGE_BYTES:
+                    log.warning("WLK message too large (%d bytes), skipping", len(raw))
+                    continue
 
-            try:
-                msg = json.loads(raw)
-            except (json.JSONDecodeError, TypeError):
-                log.debug("Invalid JSON: %r", raw[:200] if raw else raw)
-                continue
+                try:
+                    msg = json.loads(raw)
+                except (json.JSONDecodeError, TypeError):
+                    log.debug("Invalid JSON: %r", raw[:200] if raw else raw)
+                    continue
 
-            try:
-                self._handle_message(msg)
-            except Exception:
-                log.warning("Error handling WLK message", exc_info=True)
+                try:
+                    self._handle_message(msg)
+                except Exception:
+                    log.warning("Error handling WLK message", exc_info=True)
+        finally:
+            # Signal callers so they don't hang waiting for a dead connection
+            self._stop_event.set()
+            self._flush_done.set()
 
     def _handle_message(self, msg: dict[str, object]) -> None:
         """Process a WhisperLiveKit JSON message."""
