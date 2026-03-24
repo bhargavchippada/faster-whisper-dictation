@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Speech-to-text dictation tool. Captures microphone audio, detects speech boundaries via Silero VAD, transcribes via faster-whisper (WebSocket, REST API, or local), and types text into the focused application. Supports batch mode (default, highest accuracy) and streaming mode (experimental, real-time). Server mode uses WhisperLive via WebSocket for both batch and streaming. Cross-platform (Linux X11/Wayland, macOS, Windows).
+Speech-to-text dictation tool. Captures microphone audio, detects speech boundaries via Silero VAD, transcribes via faster-whisper (WebSocket, REST API, or local), and types text into the focused application. Supports batch mode (default, highest accuracy) and streaming mode (experimental, real-time). Server mode uses WhisperLiveKit via WebSocket for both batch and streaming. Cross-platform (Linux X11/Wayland, macOS, Windows).
 
 ## Architecture
 
@@ -19,8 +19,8 @@ src/whisper_dictation/
 │   ├── __init__.py     # Package exports + create_engine() factory
 │   ├── base.py         # TranscriptionEngine ABC
 │   ├── server.py       # REST API engine (OpenAI-compatible, fallback)
-│   ├── websocket.py    # WebSocket engine (WhisperLive streaming + batch)
-│   └── local.py        # Local faster-whisper engine (optional dependency)
+│   ├── local.py        # Local faster-whisper engine (optional dependency)
+│   └── whisperlivekit.py # WhisperLiveKit WebSocket engine (streaming + batch)
 └── hotkey/
     ├── __init__.py     # Public HotkeyListener export
     └── listener.py     # pynput (macOS/Windows/X11) + evdev (Wayland)
@@ -35,10 +35,19 @@ src/whisper_dictation/
 - **pynput + evdev**: pynput handles macOS/Windows/X11; evdev handles Linux Wayland where pynput fails. Callbacks fire outside the hotkey lock to prevent deadlocks.
 - **Non-blocking notifications**: `subprocess.Popen` (not `.run`) for Linux/macOS so notifications never block the daemon.
 - **Persistent HTTP session in server mode**: `ServerEngine` reuses a `requests.Session` to reduce per-request overhead when talking to the local STT server.
-- **WebSocket engine for WhisperLive**: `WebSocketEngine` handles both streaming (real-time callbacks) and batch (synchronous) transcription via WhisperLive's binary float32 PCM protocol. Does NOT extend `TranscriptionEngine` ABC (async push model vs sync request/response). Uses `_eoa_sent` guard to prevent premature completion signalling, `get_pending_text()` for safe partial text access.
-- **Batch over streaming**: Batch mode sends complete utterances for transcription (highest accuracy). Streaming mode (`--streaming`) is experimental — sends partial audio chunks for real-time output but with lower quality. In server mode, both paths use WebSocket (WhisperLive).
-- **WhisperLive segment completion**: WhisperLive only marks segments `completed: true` when a new segment starts. The last segment stays `completed: false`. `get_pending_text()` provides a fallback for unemitted partial text on timeout.
+- **WhisperLiveKit WebSocket engine**: `WhisperLiveKitEngine` handles both streaming (real-time callbacks) and batch (synchronous) transcription via WhisperLiveKit's protocol (no client handshake, int16 PCM audio, `ready_to_stop` completion signal). Does NOT extend `TranscriptionEngine` ABC (async push model vs sync request/response).
+- **Thread safety in WS engine**: `_seg_lock` protects `_emitted_count`, `_batch_collected`, and `_latest_full_text` shared between caller and receiver threads. `on_text` callbacks are called outside the lock to prevent deadlocks. `_END_SENTINEL = object()` uses identity check (`is`) not equality.
+- **Batch over streaming**: Batch mode sends complete utterances for transcription (highest accuracy). Streaming mode (`--streaming`) is experimental — sends partial audio chunks for real-time output but with lower quality. In server mode, both paths use WebSocket (WhisperLiveKit).
 - **Background daemon**: `start -b` uses Unix double-fork (`_daemonize()`) to detach from terminal. Follows Stevens APUE: setsid, chdir("/"), closerange, O_APPEND log, O_CLOEXEC. Logs to `~/.config/faster-whisper-dictation/daemon.log`.
+
+## Server Setup
+
+WhisperLiveKit is pip-installable and serves as the WebSocket backend (default URL: `http://localhost:8000`):
+
+```bash
+pip install whisperlivekit
+wlk --model large-v3 --language en --pcm-input
+```
 
 ## Security Considerations
 
@@ -48,7 +57,6 @@ src/whisper_dictation/
   via `finally` blocks to ensure restoration even on exceptions.
   Wayland `wl-copy` uses `--` to prevent argument injection from text starting with `-`.
 - **PID file locking**: PID file uses `fcntl.flock` for exclusive access on Unix, with `os.kill(pid, 0)` for liveness checks. Lock fd stored in module-level `_pid_lock_fd`.
-- **No network exposure**: Docker server binds to `127.0.0.1` only. Audio never leaves localhost.
 - **VAD model integrity**: ONNX model is fetched from GitHub over HTTPS with a 60s timeout and cached locally. SHA-256 hash verification is opt-in via `DICTATION_VAD_VERIFY_HASH=true`. Custom model URLs (`DICTATION_VAD_MODEL_URL`) are validated to use http/https scheme at import time.
 - **Windows clipboard safety**: `OpenClipboard` return values are checked; allocated memory is freed on failure.
 - **Server URL validation**: `validate()` checks that `server.url` uses http/https scheme and has a valid hostname. Prevents SSRF via config injection.
@@ -56,6 +64,11 @@ src/whisper_dictation/
 - **Paste delay validation**: `DICTATION_PASTE_DELAY` is validated at import time (must be 0.0-10.0, rejects NaN/Inf).
 - **Error resilience**: Transcription and typing exceptions are caught and logged without crashing the daemon. Audio stream start failures reset recording state and notify the user.
 - **AppleScript sanitization**: Notification messages strip null bytes and control characters before interpolation into AppleScript strings.
+- **WebSocket URL validation**: `_http_to_ws_url()` rejects non-http/https schemes with ValueError. `_is_loopback()` uses `ipaddress.ip_address().is_loopback` for full IPv4/v6 range. Unencrypted `ws://` to non-loopback triggers a warning.
+- **WS message size cap**: `_MAX_MESSAGE_BYTES = 1MB` enforced at both websockets library level (`max_size`) and application level. Prevents memory exhaustion from malicious server responses.
+- **WS batch segment cap**: `_MAX_BATCH_SEGMENTS = 1000` prevents unbounded `_batch_collected` list growth.
+- **WS close() unblocks waiters**: `close()` sets `_flush_done` to prevent `wait_for_completion()` from hanging indefinitely.
+- **WS engine snapshot pattern**: `_on_audio_chunk` snapshots `ws_engine = self._ws_engine` before use to prevent race with `_on_deactivate` nulling the reference.
 
 ## Daemon Management
 
@@ -102,7 +115,8 @@ uv build --clear --no-cache
 - No tests should require a running Whisper server, microphone, or display server.
 - Use `unittest.mock.patch` for all external subprocess calls and hardware interfaces.
 - Target: 100% test coverage. All new code must include tests.
-- Current status: 460 tests, 100% line coverage.
+- Tests must never hang — mock `wait_for_completion()` in batch tests with `patch.object(engine, 'wait_for_completion', return_value=True)`. See `tests/test_engine_whisperlivekit.py` for established patterns.
+- Current status: 478 tests, 100% line coverage, runs in ~2s.
 
 ## CI
 
@@ -110,7 +124,7 @@ GitHub Actions runs on every push/PR to main:
 - Python 3.10, 3.11, 3.12, 3.13, 3.14 matrix
 - Lint with ruff
 - Tests with coverage gate (minimum 80%)
-- 460 tests, 100% coverage
+- 478 tests, 100% coverage
 
 ## Performance Notes
 

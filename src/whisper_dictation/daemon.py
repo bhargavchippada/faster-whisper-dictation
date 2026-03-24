@@ -18,7 +18,6 @@ from .typer import type_text
 from .vad import SpeechDetector
 
 if TYPE_CHECKING:
-    from .engine.websocket import WebSocketEngine
     from .engine.whisperlivekit import WhisperLiveKitEngine
 
 log = logging.getLogger(__name__)
@@ -39,7 +38,7 @@ class DictationDaemon:
         # WebSocket streaming: server handles VAD, text arrives via callback
         # Local streaming: local VAD splits utterances, REST/local engine transcribes
         self._use_ws = streaming and config.engine.type == "server"
-        self._ws_engine: WebSocketEngine | WhisperLiveKitEngine | None = None
+        self._ws_engine: WhisperLiveKitEngine | None = None
 
         # VAD only needed for local-engine streaming or batch mode
         self._vad = SpeechDetector(
@@ -60,8 +59,8 @@ class DictationDaemon:
 
     def _create_ws_engine(
         self, **kwargs: object,
-    ) -> WebSocketEngine | WhisperLiveKitEngine:
-        """Create the appropriate WS engine based on config.websocket.backend."""
+    ) -> WhisperLiveKitEngine:
+        """Create the WhisperLiveKit WebSocket engine."""
         return create_ws_engine(self.config, **kwargs)  # type: ignore[return-value]
 
     def _on_audio_chunk(self, audio: np.ndarray) -> None:
@@ -123,7 +122,6 @@ class DictationDaemon:
             ws_cfg = self.config.websocket
             ws = self._create_ws_engine(
                 server_url=self.config.server.url,
-                model=self.config.server.model,
                 language=self.config.server.language,
                 reconnect_attempts=ws_cfg.reconnect_attempts,
                 reconnect_delay=ws_cfg.reconnect_delay,
@@ -160,11 +158,9 @@ class DictationDaemon:
             ws_cfg = self.config.websocket
             ws_engine = self._create_ws_engine(
                 server_url=self.config.server.url,
-                model=self.config.server.model,
                 language=self.config.server.language,
                 reconnect_attempts=ws_cfg.reconnect_attempts,
                 reconnect_delay=ws_cfg.reconnect_delay,
-                use_vad=(self.config.websocket.backend == "whisperlive"),
                 on_text=self._on_ws_text,
             )
             try:
@@ -258,13 +254,12 @@ class DictationDaemon:
         # Try REST health check first (works with OpenAI-compatible servers)
         if self._engine.is_available():
             return True
-        # Fall back to WebSocket probe (WhisperLive has no /health endpoint)
+        # Fall back to WebSocket probe (WhisperLiveKit may lack /health endpoint)
         if self.config.engine.type == "server":
             ws = self._create_ws_engine(
                 server_url=self.config.server.url,
-                model=self.config.server.model,
                 language=self.config.server.language,
-                reconnect_attempts=0,
+                reconnect_attempts=0,  # probe: fail fast, do not retry
                 reconnect_delay=self.config.websocket.reconnect_delay,
             )
             try:
@@ -279,7 +274,7 @@ class DictationDaemon:
             engine_type = self.config.engine.type
             if engine_type == "server":
                 log.error(
-                    "Server not reachable at %s. Start with: docker compose up -d",
+                    "Server not reachable at %s. Start with: wlk --model large-v3",
                     self.config.server.url,
                 )
             else:

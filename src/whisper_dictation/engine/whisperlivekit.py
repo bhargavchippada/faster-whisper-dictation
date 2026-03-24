@@ -101,15 +101,12 @@ class WhisperLiveKitEngine:
         self,
         *,
         server_url: str,
-        model: str,
         language: str,
         reconnect_attempts: int = 3,
         reconnect_delay: float = 1.0,
-        use_vad: bool = True,
         on_text: Callable[[str], None] | None = None,
     ):
         self._server_url = server_url.rstrip("/")
-        self._model = model
         self._language = language
         if reconnect_attempts < 0:
             raise ValueError("reconnect_attempts must be >= 0")
@@ -117,10 +114,6 @@ class WhisperLiveKitEngine:
             raise ValueError("reconnect_delay must be > 0")
         self._reconnect_attempts = reconnect_attempts
         self._reconnect_delay = reconnect_delay
-        # use_vad is accepted but ignored — WhisperLiveKit has no client
-        # handshake to send VAD preferences. Kept for API parity with
-        # WebSocketEngine so the daemon factory can pass identical kwargs.
-        del use_vad
         self._on_text = on_text or (lambda t: None)
         self._uid = str(uuid.uuid4())
 
@@ -149,13 +142,8 @@ class WhisperLiveKitEngine:
             self._server_url, path="/asr", language=self._language,
         )
 
-    def connect(self, *, use_vad: bool | None = None) -> None:
-        """Open WebSocket connection with retry, receive server config, start threads.
-
-        Args:
-            use_vad: Accepted for API compatibility but not sent to WhisperLiveKit
-                (no client handshake). Ignored.
-        """
+    def connect(self) -> None:
+        """Open WebSocket connection with retry, receive server config, start threads."""
         self._stop_event.clear()
         self._connected.clear()
         self._flush_done.clear()
@@ -275,7 +263,7 @@ class WhisperLiveKitEngine:
         ready_to_stop, returns concatenated text.
         """
         try:
-            self.connect(use_vad=False)
+            self.connect()
 
             # Set AFTER connect() which resets _batch_collected to None
             with self._seg_lock:
@@ -376,7 +364,13 @@ class WhisperLiveKitEngine:
     def is_available(self) -> bool:
         """Check if the WhisperLiveKit server is reachable."""
         try:
-            with ws_sync.connect(self.ws_url, close_timeout=3, open_timeout=3):
+            with ws_sync.connect(self.ws_url, close_timeout=3, open_timeout=3) as ws:
+                # Consume the server's initial config message before closing
+                # to avoid leaving the server handler in a confused state.
+                try:
+                    ws.recv(timeout=2.0)
+                except TimeoutError:
+                    pass
                 return True
         except Exception:
             return False

@@ -9,7 +9,6 @@ from .server import ServerEngine
 
 if TYPE_CHECKING:
     from ..config import Config
-    from .websocket import WebSocketEngine
     from .whisperlivekit import WhisperLiveKitEngine
 
 __all__ = [
@@ -33,21 +32,15 @@ def create_engine(config: Config) -> TranscriptionEngine:
     return ServerEngine(config.server)
 
 
-def create_ws_engine(config: Config, **kwargs: Any) -> WebSocketEngine | WhisperLiveKitEngine:
-    """Create the configured WebSocket engine based on config.websocket.backend.
+def create_ws_engine(config: Config, **kwargs: Any) -> WhisperLiveKitEngine:
+    """Create the WhisperLiveKit WebSocket engine for streaming/batch transcription.
 
-    Required kwargs: server_url, model, language, reconnect_attempts, reconnect_delay.
-    Optional kwargs: use_vad (bool), on_text (Callable[[str], None]).
+    ``config`` is accepted for future extensibility (e.g. selecting between
+    backends) but currently unused — all engine parameters come from kwargs.
+
+    Required kwargs: server_url, language, reconnect_attempts, reconnect_delay.
+    Optional kwargs: on_text (Callable[[str], None]).
     """
-    backend = config.websocket.backend
-    if backend == "whisperlivekit":
-        from .whisperlivekit import WhisperLiveKitEngine
+    from .whisperlivekit import WhisperLiveKitEngine
 
-        return WhisperLiveKitEngine(**kwargs)
-
-    if backend != "whisperlive":
-        raise ValueError(f"Unknown websocket.backend: {backend!r}")
-
-    from .websocket import WebSocketEngine
-
-    return WebSocketEngine(**kwargs)
+    return WhisperLiveKitEngine(**kwargs)

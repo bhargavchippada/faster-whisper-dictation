@@ -348,7 +348,7 @@ class TestCmdStatus:
                     "mode": "toggle",
                     "hotkey": "alt+v",
                     "engine": "server",
-                    "server_url": "http://localhost:9090",
+                    "server_url": "http://localhost:8000",
                 }
             )
         )
@@ -1005,31 +1005,9 @@ class TestCmdTranscribe:
         with (
             patch("whisper_dictation.cli.load_config", return_value=Config()),
             patch("whisper_dictation.engine.create_engine", return_value=mock_engine),
-            patch("whisper_dictation.engine.websocket.WebSocketEngine", return_value=mock_ws),
+            patch("whisper_dictation.engine.create_ws_engine", return_value=mock_ws),
         ):
             cmd_transcribe(_make_transcribe_args(file=str(wav_path)))
-        mock_ws.transcribe_batch.assert_called_once()
-        mock_engine.close.assert_called_once()
-
-    def test_transcribe_file_uses_whisperlivekit_backend(self, tmp_path):
-        from whisper_dictation.config import Config, WebSocketConfig
-
-        wav_path = _make_silent_wav(tmp_path)
-        mock_engine = MagicMock()
-        mock_ws = MagicMock()
-        mock_ws.transcribe_batch.return_value = "hello"
-        config = Config(websocket=WebSocketConfig(backend="whisperlivekit"))
-
-        with (
-            patch("whisper_dictation.cli.load_config", return_value=config),
-            patch("whisper_dictation.engine.create_engine", return_value=mock_engine),
-            patch(
-                "whisper_dictation.engine.whisperlivekit.WhisperLiveKitEngine",
-                return_value=mock_ws,
-            ),
-        ):
-            cmd_transcribe(_make_transcribe_args(file=str(wav_path)))
-
         mock_ws.transcribe_batch.assert_called_once()
         mock_engine.close.assert_called_once()
 
@@ -1048,7 +1026,7 @@ class TestCmdTranscribe:
         with (
             patch("whisper_dictation.cli.load_config", return_value=Config()),
             patch("whisper_dictation.engine.create_engine", return_value=mock_engine),
-            patch("whisper_dictation.engine.websocket.WebSocketEngine", return_value=mock_ws),
+            patch("whisper_dictation.engine.create_ws_engine", return_value=mock_ws),
             patch.dict("sys.modules", {"sounddevice": mock_sd}),
         ):
             cmd_transcribe(_make_transcribe_args(record=1.0))
@@ -1073,7 +1051,7 @@ class TestCmdTranscribe:
         with (
             patch("whisper_dictation.cli.load_config", return_value=Config()),
             patch("whisper_dictation.engine.create_engine", return_value=mock_engine),
-            patch("whisper_dictation.engine.websocket.WebSocketEngine", return_value=mock_ws),
+            patch("whisper_dictation.engine.create_ws_engine", return_value=mock_ws),
             patch.dict("sys.modules", {"sounddevice": mock_sd}),
             pytest.raises(SystemExit),
         ):
@@ -1092,7 +1070,7 @@ class TestCmdTranscribe:
             patch(
                 "whisper_dictation.engine.create_engine", return_value=mock_engine
             ) as mock_create,
-            patch("whisper_dictation.engine.websocket.WebSocketEngine", return_value=mock_ws),
+            patch("whisper_dictation.engine.create_ws_engine", return_value=mock_ws),
         ):
             cmd_transcribe(
                 _make_transcribe_args(file=str(wav_path), server_url="http://custom:9000")
@@ -1126,7 +1104,7 @@ class TestCmdTranscribe:
         with (
             patch("whisper_dictation.cli.load_config", return_value=Config()),
             patch("whisper_dictation.engine.create_engine", return_value=mock_engine),
-            patch("whisper_dictation.engine.websocket.WebSocketEngine", return_value=mock_ws),
+            patch("whisper_dictation.engine.create_ws_engine", return_value=mock_ws),
             pytest.raises(SystemExit),
         ):
             cmd_transcribe(_make_transcribe_args(file=str(wav_path)))

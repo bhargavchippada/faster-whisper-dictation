@@ -1,10 +1,10 @@
 # faster-whisper-dictation
 
 [![CI](https://github.com/bhargavchippada/faster-whisper-dictation/actions/workflows/ci.yml/badge.svg)](https://github.com/bhargavchippada/faster-whisper-dictation/actions/workflows/ci.yml)
-[![Python 3.10–3.14](https://img.shields.io/badge/python-3.10--3.14-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.10--3.14](https://img.shields.io/badge/python-3.10--3.14-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Real-time speech-to-text dictation powered by [faster-whisper](https://github.com/SYSTRAN/faster-whisper). Speak and watch text appear instantly in any application — fully offline, no cloud APIs, no data leaves your machine.
+Real-time speech-to-text dictation powered by [faster-whisper](https://github.com/SYSTRAN/faster-whisper). Speak and watch text appear instantly in any application -- fully offline, no cloud APIs, no data leaves your machine.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/bhargavchippada/faster-whisper-dictation/main/assets/demo-server.gif" alt="Demo: server mode with hold-to-talk" width="740">
@@ -13,40 +13,40 @@ Real-time speech-to-text dictation powered by [faster-whisper](https://github.co
 ## How it works
 
 ```
-Microphone ──▶ Silero VAD ──▶ Whisper Server ──▶ Type into focused app
-(sounddevice)  (local)        (WebSocket)        (platform-native)
+Microphone --> Silero VAD --> WhisperLiveKit Server --> Type into focused app
+(sounddevice)  (local)       (WebSocket / REST)        (platform-native)
 ```
 
-Audio is captured from your microphone, speech boundaries are detected locally using [Silero VAD](https://github.com/snakers4/silero-vad), each complete utterance is sent to a [WhisperLive](https://github.com/collabora/WhisperLive) server via WebSocket for transcription, and the result is typed into whatever application has focus.
+Audio is captured from your microphone, speech boundaries are detected locally using [Silero VAD](https://github.com/snakers4/silero-vad), each complete utterance is sent to a [WhisperLiveKit](https://github.com/QuentinFuxa/WhisperLiveKit) server via WebSocket for transcription, and the result is typed into whatever application has focus.
 
 ## Why local Whisper?
 
-Cloud dictation services (Google, Apple, Microsoft) send your audio to remote servers. Every word you speak is processed, stored, and potentially used for training — even sensitive conversations, passwords spoken aloud, or private thoughts.
+Cloud dictation services (Google, Apple, Microsoft) send your audio to remote servers. Every word you speak is processed, stored, and potentially used for training -- even sensitive conversations, passwords spoken aloud, or private thoughts.
 
 **faster-whisper-dictation keeps everything on your machine:**
 
-- **Zero network dependency** — audio never leaves your computer (with local engine or local Docker)
-- **No accounts or API keys** — install and run, no sign-up required
-- **No telemetry** — the tool collects nothing about your usage
-- **Full model control** — you choose which Whisper model to run and where
-- **Audit-friendly** — open source, read every line of what handles your audio
+- **Zero network dependency** -- audio never leaves your computer
+- **No accounts or API keys** -- install and run, no sign-up required
+- **No telemetry** -- the tool collects nothing about your usage
+- **Full model control** -- you choose which Whisper model to run and where
+- **Audit-friendly** -- open source, read every line of what handles your audio
 
-Even in server mode, the default configuration binds the Docker container to `localhost` — your audio stays on your LAN at most.
+Even in server mode, the default configuration binds to `localhost` -- your audio stays on your machine.
 Recent live benchmarks on the current build showed the daemon averaging `0.00%` CPU while idle in server mode.
 
 ## Features
 
-- **Batch transcription** — speak a full utterance, release the hotkey, and the complete text is typed at once (default, most accurate)
-- **Hold-to-talk** — hold the hotkey to dictate, release to stop
-- **Toggle mode** — press hotkey to start, press again to stop
-- **Configurable hotkey** — default `Alt+V`, fully customizable
-- **Background daemon** — `start -b` detaches from terminal, logs to file
-- **Cross-platform** — Linux (X11 + Wayland), macOS, Windows
-- **Flexible backend** — server mode uses WhisperLive via WebSocket; also works with OpenAI-compatible REST APIs
-- **Local engine fallback** — optional built-in faster-whisper engine, no server needed
-- **Fully offline** — all processing happens on your machine
-- **Privacy-first** — no cloud, no accounts, no telemetry
-- **Streaming mode** *(experimental)* — `--streaming` sends partial audio for real-time text, but quality is lower than batch mode
+- **Batch transcription** -- speak a full utterance, release the hotkey, and the complete text is typed at once (default, most accurate)
+- **Hold-to-talk** -- hold the hotkey to dictate, release to stop
+- **Toggle mode** -- press hotkey to start, press again to stop
+- **Configurable hotkey** -- default `Alt+V`, fully customizable
+- **Background daemon** -- `start -b` detaches from terminal, logs to file
+- **Cross-platform** -- Linux (X11 + Wayland), macOS, Windows
+- **WhisperLiveKit backend** -- server mode uses WhisperLiveKit via WebSocket (int16 PCM); also exposes an OpenAI-compatible REST API
+- **Local engine fallback** -- optional built-in faster-whisper engine, no server needed
+- **Fully offline** -- all processing happens on your machine
+- **Privacy-first** -- no cloud, no accounts, no telemetry
+- **Streaming mode** *(experimental)* -- `--streaming` sends partial audio for real-time text, but quality is lower than batch mode
 
 ## Install
 
@@ -66,7 +66,7 @@ pip install faster-whisper-dictation
 uv build --clear --no-cache
 ```
 
-### Optional: local engine (no Docker server needed)
+### Optional: local engine (no server needed)
 
 ```bash
 # CPU only
@@ -104,25 +104,26 @@ No additional system dependencies needed.
 
 ## Quick start
 
-### Option A: With Docker server (recommended for GPU users)
+### Option A: WhisperLiveKit server (recommended)
+
+WhisperLiveKit is a pip-installable Whisper server. No Docker required.
 
 ```bash
-# 1. Clone the repo (Docker compose files are not in the pip package)
-git clone https://github.com/bhargavchippada/faster-whisper-dictation.git
-cd faster-whisper-dictation
+# 1. Install WhisperLiveKit (requires Python 3.11+)
+pip install whisperlivekit          # CPU
+pip install whisperlivekit[gpu]     # GPU (requires CUDA)
 
-# 2. Start the whisper server
-docker compose up -d          # GPU (NVIDIA CUDA)
-# docker compose -f docker-compose.cpu.yml up -d   # CPU fallback
+# 2. Start the server
+wlk --model large-v3 --language en
 
-# 3. Install and start dictation
+# 3. Install and start dictation (in another terminal)
 pip install faster-whisper-dictation
 faster-whisper-dictation start
 
 # 4. Press Alt+V to start/stop dictation
 ```
 
-### Option B: Local engine (no Docker, no clone needed)
+### Option B: Local engine (no server needed)
 
 ```bash
 # Install with built-in faster-whisper engine
@@ -155,7 +156,7 @@ faster-whisper-dictation start --mode hold
 faster-whisper-dictation start --hotkey "ctrl+shift+d"
 
 # Use a different server
-faster-whisper-dictation start --server-url http://my-server:10300
+faster-whisper-dictation start --server-url http://my-server:8000
 
 # Use local engine instead of server
 faster-whisper-dictation start --engine local
@@ -197,7 +198,7 @@ Config file location: `~/.config/faster-whisper-dictation/config.toml`
 
 ```toml
 [server]
-url = "http://localhost:9090"
+url = "http://localhost:8000"
 model = "Systran/faster-whisper-large-v3"
 language = "en"
 timeout = 10            # request timeout in seconds
@@ -234,7 +235,7 @@ reconnect_delay = 1.0   # seconds between retries
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `WHISPER_SERVER_URL` | `http://localhost:9090` | Whisper server URL |
+| `WHISPER_SERVER_URL` | `http://localhost:8000` | Whisper server URL |
 | `WHISPER_MODEL` | `Systran/faster-whisper-large-v3` | Model name |
 | `WHISPER_LANG` | `en` | Language code |
 | `WHISPER_TIMEOUT` | `10` | Request timeout (seconds) |
@@ -249,7 +250,7 @@ reconnect_delay = 1.0   # seconds between retries
 | `DICTATION_AUDIO_DEVICE` | (system default) | Audio input device name |
 | `DICTATION_SAMPLE_RATE` | `16000` | Audio sample rate (Hz) |
 | `DICTATION_VAD_THRESHOLD` | `0.5` | VAD confidence threshold (0.0-1.0) |
-| `DICTATION_VAD_SILENCE_MS` | `800` | Silence duration to end utterance (ms) |
+| `DICTATION_VAD_SILENCE_MS` | `200` | Silence duration to end utterance (ms) |
 | `DICTATION_VAD_MIN_SPEECH_MS` | `250` | Minimum speech duration to accept (ms) |
 | `DICTATION_VAD_MAX_SPEECH_S` | `90.0` | Maximum single utterance duration (s) |
 | `DICTATION_VAD_MODEL_URL` | (pinned release) | Custom Silero VAD ONNX model URL |
@@ -264,12 +265,12 @@ faster-whisper-dictation/
 ├── src/whisper_dictation/
 │   ├── cli.py              # CLI: start, stop, status, config, devices, transcribe
 │   ├── config.py           # TOML config + env vars + CLI flags + validation
-│   ├── daemon.py           # Main daemon: hotkey → audio → VAD → engine → typer
+│   ├── daemon.py           # Main daemon: hotkey -> audio -> VAD -> engine -> typer
 │   ├── engine/
 │   │   ├── __init__.py     # create_engine() factory
 │   │   ├── base.py         # TranscriptionEngine ABC
 │   │   ├── server.py       # REST API engine (OpenAI-compatible, fallback)
-│   │   ├── websocket.py    # WebSocket engine (WhisperLive streaming + batch)
+│   │   ├── whisperlivekit.py # WhisperLiveKit WebSocket engine (batch + streaming)
 │   │   └── local.py        # Local faster-whisper engine
 │   ├── hotkey/
 │   │   └── listener.py     # pynput + evdev hotkey detection
@@ -277,10 +278,8 @@ faster-whisper-dictation/
 │   ├── vad.py              # Silero VAD (ONNX, SHA-256 verified)
 │   ├── typer.py            # Platform-aware text input (clipboard + paste)
 │   └── notifier.py         # Cross-platform desktop notifications
-├── tests/                  # 460 tests, 100% coverage
+├── tests/                  # 478 tests, 100% coverage
 ├── .github/workflows/      # CI: lint + test on Python 3.10-3.14
-├── docker-compose.yml      # GPU server
-├── docker-compose.cpu.yml  # CPU server
 └── pyproject.toml          # Package config (uv/pip installable)
 ```
 
@@ -288,10 +287,10 @@ faster-whisper-dictation/
 
 | Mode | Backend | Setup | Best for |
 |------|---------|-------|----------|
-| **Server** (default) | Docker container with [WhisperLive](https://github.com/collabora/WhisperLive) via WebSocket | `docker compose up -d` | GPU users, streaming + batch, shared servers |
+| **Server** (default) | [WhisperLiveKit](https://github.com/QuentinFuxa/WhisperLiveKit) via WebSocket | `pip install whisperlivekit && wlk --model large-v3` | GPU users, streaming + batch, shared servers |
 | **Local** | Built-in faster-whisper | `pip install "faster-whisper-dictation[local]"` | Simple setup, single-user, offline |
 
-Server mode uses WebSocket for both batch and streaming transcription (shared GPU model, lower latency).
+Server mode uses WebSocket for both batch and streaming transcription (shared GPU model, lower latency). REST API is available as a fallback.
 
 ### Platform support
 
@@ -302,23 +301,54 @@ Server mode uses WebSocket for both batch and streaming transcription (shared GP
 | Notifications | notify-send | notify-send | osascript | plyer |
 | Audio capture | sounddevice | sounddevice | sounddevice | sounddevice |
 
-## Docker server
+## WhisperLiveKit server
 
-The server component runs [WhisperLive](https://github.com/collabora/WhisperLive), which provides WebSocket-based streaming transcription with GPU acceleration.
+[WhisperLiveKit](https://github.com/QuentinFuxa/WhisperLiveKit) is a pip-installable Whisper transcription server that exposes both a WebSocket endpoint (`/asr`) for streaming int16 PCM audio and an OpenAI-compatible REST endpoint (`/v1/audio/transcriptions`) for batch transcription.
+
+### Installation
+
+```bash
+# CPU mode
+pip install whisperlivekit
+
+# GPU mode (requires CUDA)
+pip install whisperlivekit[gpu]
+```
+
+**Note:** WhisperLiveKit requires Python 3.11+. The dictation client itself works with Python 3.10+, so you may need separate environments if running both on the same machine.
+
+### Running the server
+
+```bash
+# Basic usage
+wlk --model large-v3 --language en
+
+# With PCM input (used by the dictation client)
+wlk --model large-v3 --language en --pcm-input
+
+# Specify host and port
+wlk --model large-v3 --language en --host 0.0.0.0 --port 8000
+```
+
+### Server capabilities
+
+| Feature | Description |
+|---------|-------------|
+| WebSocket streaming | `/asr` endpoint, int16 PCM audio |
+| REST API | `/v1/audio/transcriptions` (OpenAI-compatible) |
+| GPU acceleration | CUDA via `whisperlivekit[gpu]` |
+| CPU mode | Works without GPU, slower |
+| Diarization | Speaker identification support |
+| Translation | Translate speech to English |
+| Multiple models | Any faster-whisper compatible model |
+
+### Resource usage
 
 | Setting | GPU mode | CPU mode |
 |---------|----------|----------|
-| Compose file | `docker-compose.yml` | `docker-compose.cpu.yml` |
-| Image | `whisperlive-gpu:latest` | `whisperlive-cpu:latest` |
 | Compute | NVIDIA CUDA (float16) | CPU (int8) |
 | Memory | ~2GB VRAM | ~2GB RAM |
-| Port | `9090` (localhost) | `9090` (localhost) |
-
-```bash
-docker compose up -d      # start
-docker compose logs -f    # view logs
-docker compose down       # stop
-```
+| Default port | `8000` | `8000` |
 
 ## API compatibility
 
@@ -334,27 +364,27 @@ faster-whisper-dictation start --server-url https://api.groq.com/openai
 
 ## Security
 
-- **No command injection** — all subprocess calls use list arguments, never `shell=True`. Windows clipboard uses Win32 API directly (no PowerShell). Wayland uses `--` separator to prevent flag injection.
-- **Clipboard hygiene** — previous clipboard is saved before paste and restored after via `finally` blocks, under a thread lock to prevent concurrent corruption.
-- **PID file locking** — exclusive `fcntl.flock` prevents duplicate daemon instances (falls back to simple PID on Windows).
-- **Model integrity** — ONNX VAD model downloads use a 60s timeout. SHA-256 verification is opt-in (`DICTATION_VAD_VERIFY_HASH=true`). Partial downloads are atomically cleaned up. Custom model URLs validated to use http/https.
-- **Config validation** — all values validated with clear error messages. Server URLs checked for http/https scheme. Invalid env vars rejected at startup.
-- **No network exposure** — Docker server binds to `127.0.0.1` only by default.
-- **No telemetry** — zero data collection, no phone-home, no analytics.
+- **No command injection** -- all subprocess calls use list arguments, never `shell=True`. Windows clipboard uses Win32 API directly (no PowerShell). Wayland uses `--` separator to prevent flag injection.
+- **Clipboard hygiene** -- previous clipboard is saved before paste and restored after via `finally` blocks, under a thread lock to prevent concurrent corruption.
+- **PID file locking** -- exclusive `fcntl.flock` prevents duplicate daemon instances (falls back to simple PID on Windows).
+- **Model integrity** -- ONNX VAD model downloads use a 60s timeout. SHA-256 verification is opt-in (`DICTATION_VAD_VERIFY_HASH=true`). Partial downloads are atomically cleaned up. Custom model URLs validated to use http/https.
+- **Config validation** -- all values validated with clear error messages. Server URLs checked for http/https scheme. Invalid env vars rejected at startup.
+- **Localhost by default** -- the dictation client connects to `localhost` by default. To restrict server network exposure, run `wlk --host 127.0.0.1`.
+- **No telemetry** -- zero data collection, no phone-home, no analytics.
+- **WebSocket safety** -- message size capped at 1MB, batch segment count capped at 1000 to prevent memory exhaustion. Non-loopback unencrypted WebSocket connections trigger a warning.
 
 ## Troubleshooting
 
 | Problem | Solution |
 |---------|----------|
 | Hotkey not responding | Check `faster-whisper-dictation status`. On Wayland, ensure your user is in the `input` group. |
-| "Server not reachable" | Start the Docker server: `docker compose up -d`. Or use `--engine local`. |
+| "Server not reachable" | Start the WhisperLiveKit server: `wlk --model large-v3 --language en`. Or use `--engine local`. |
 | No text appears | Verify your mic: `faster-whisper-dictation transcribe --record 5` |
 | Wrong microphone | List devices with `faster-whisper-dictation devices` and set `audio.device` in config. |
 | Text in wrong window | Text is typed into the focused window when transcription completes. Keep focus on target app. |
 | Whisper hallucinations | Increase VAD threshold: `vad.threshold = 0.7` in config. |
 | Wrong words (e.g. "passed" instead of "fast") | Set `server.prompt` or `server.hotwords` in config to bias transcription. |
 | ydotool not working | Run `sudo systemctl start ydotool` and add user to `input` group. |
-| Docker volume permission error | `docker compose down && docker volume rm faster-whisper-dictation_faster-whisper-models && docker compose up -d` |
 
 ## Development
 

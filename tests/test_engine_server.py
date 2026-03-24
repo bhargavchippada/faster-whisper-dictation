@@ -15,7 +15,7 @@ from whisper_dictation.engine.server import ServerEngine
 @pytest.fixture
 def server_config():
     return ServerConfig(
-        url="http://localhost:9090",
+        url="http://localhost:8000",
         model="tiny",
         language="en",
         timeout=10,
@@ -35,8 +35,8 @@ def engine(server_config):
 class TestServerEngineInit:
     def test_url_construction(self, server_config):
         engine = ServerEngine(server_config)
-        assert engine._url == "http://localhost:9090/v1/audio/transcriptions"
-        assert engine._health_url == "http://localhost:9090/health"
+        assert engine._url == "http://localhost:8000/v1/audio/transcriptions"
+        assert engine._health_url == "http://localhost:8000/health"
 
     def test_url_trailing_slash_stripped(self):
         cfg = ServerConfig(url="http://host:8080/")
@@ -143,7 +143,7 @@ class TestIsAvailable:
 
         assert engine.is_available() is True
         engine._session.get.assert_called_once_with(
-            "http://localhost:9090/health",
+            "http://localhost:8000/health",
             timeout=3,
         )
 

@@ -29,7 +29,7 @@ from whisper_dictation.config import (
 class TestDefaults:
     def test_server_defaults(self):
         cfg = ServerConfig()
-        assert cfg.url == "http://localhost:9090"
+        assert cfg.url == "http://localhost:8000"
         assert cfg.model == "Systran/faster-whisper-large-v3"
         assert cfg.language == "en"
         assert cfg.timeout == 10
@@ -103,7 +103,7 @@ class TestBuildSection:
     def test_partial_override(self):
         section = _build_section({"language": "fr"}, ServerConfig)
         assert section.language == "fr"
-        assert section.url == "http://localhost:9090"  # default preserved
+        assert section.url == "http://localhost:8000"  # default preserved
 
     def test_all_sections(self):
         for cls in (ServerConfig, HotkeyConfig, VADConfig, AudioConfig, EngineConfig):
@@ -233,7 +233,7 @@ class TestLoadConfig:
         with patch.dict("os.environ", {}, clear=True):
             cfg = load_config(toml_path)
         assert cfg.server.model == "tiny"
-        assert cfg.server.url == "http://localhost:9090"  # default
+        assert cfg.server.url == "http://localhost:8000"  # default
         assert cfg.hotkey == HotkeyConfig()  # all defaults
 
     def test_toml_with_unknown_keys(self, tmp_path):
@@ -403,10 +403,22 @@ class TestValidate:
         with pytest.raises(ValueError, match="websocket.reconnect_delay"):
             validate(cfg)
 
-    def test_ws_backend_invalid(self):
-        cfg = Config(websocket=WebSocketConfig(backend="unknown"))
-        with pytest.raises(ValueError, match="websocket.backend"):
+    # Language validation
+
+    def test_language_valid_codes(self):
+        for lang in ("en", "de", "zh-CN", "pt-BR", "auto"):
+            cfg = Config(server=ServerConfig(language=lang))
+            validate(cfg)  # should not raise
+
+    def test_language_invalid_code(self):
+        cfg = Config(server=ServerConfig(language="not a language!"))
+        with pytest.raises(ValueError, match="server.language"):
             validate(cfg)
+
+    def test_language_empty_passes(self):
+        """Empty language is allowed (server uses its own default)."""
+        cfg = Config(server=ServerConfig(language=""))
+        validate(cfg)  # should not raise
 
 
 # ---------------------------------------------------------------------------

@@ -302,7 +302,7 @@ _DEFAULT_CONFIG_TEMPLATE = """\
 # See: https://github.com/bhargavchippada/faster-whisper-dictation
 
 [server]
-url = "http://localhost:9090"         # WhisperLive server URL
+url = "http://localhost:8000"         # WhisperLiveKit server URL
 model = "Systran/faster-whisper-large-v3"
 language = "en"                       # Language code (e.g. "en", "es", "de")
 timeout = 10                          # Request timeout in seconds
@@ -326,12 +326,11 @@ channels = 1                          # Number of audio channels (1 = mono)
 # device = "fifine Microphone"        # Uncomment to use a specific mic
 
 [engine]
-type = "server"                       # "server" (Docker/remote) or "local" (local)
+type = "server"                       # "server" (WhisperLiveKit/remote) or "local" (local)
 compute_type = "auto"                 # "auto", "float16" (GPU), "int8" (CPU)
 device = "auto"                       # "auto", "cuda", "cpu"
 
 [websocket]
-backend = "whisperlive"               # "whisperlive" or "whisperlivekit"
 reconnect_attempts = 3                # Number of reconnection attempts
 reconnect_delay = 1.0                 # Seconds between reconnection attempts
 """
@@ -389,7 +388,6 @@ def cmd_config(args: argparse.Namespace) -> None:
     print(f"  device       = {config.engine.device}")
     print()
     print("[websocket]")
-    print(f"  backend            = {config.websocket.backend}")
     print(f"  reconnect_attempts = {config.websocket.reconnect_attempts}")
     print(f"  reconnect_delay    = {config.websocket.reconnect_delay}s")
 
@@ -430,7 +428,6 @@ def cmd_transcribe(args: argparse.Namespace) -> None:
             ws = create_ws_engine(
                 config,
                 server_url=config.server.url,
-                model=config.server.model,
                 language=config.server.language,
                 reconnect_attempts=ws_cfg.reconnect_attempts,
                 reconnect_delay=ws_cfg.reconnect_delay,

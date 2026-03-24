@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 from dataclasses import dataclass, field, fields
 from pathlib import Path
@@ -26,7 +27,7 @@ LOG_FILE = CONFIG_DIR / "daemon.log"
 
 @dataclass(frozen=True)
 class ServerConfig:
-    url: str = "http://localhost:9090"
+    url: str = "http://localhost:8000"
     model: str = "Systran/faster-whisper-large-v3"
     language: str = "en"
     timeout: int = 10
@@ -65,7 +66,6 @@ class EngineConfig:
 
 @dataclass(frozen=True)
 class WebSocketConfig:
-    backend: str = "whisperlive"  # "whisperlive" or "whisperlivekit"
     reconnect_attempts: int = 3
     reconnect_delay: float = 1.0
 
@@ -101,7 +101,6 @@ def _apply_env_overrides(config: Config) -> Config:
         "DICTATION_VAD_SILENCE_MS": ("vad", "silence_ms"),
         "DICTATION_VAD_MIN_SPEECH_MS": ("vad", "min_speech_ms"),
         "DICTATION_VAD_MAX_SPEECH_S": ("vad", "max_speech_s"),
-        "DICTATION_WS_BACKEND": ("websocket", "backend"),
         "DICTATION_WS_RECONNECT_ATTEMPTS": ("websocket", "reconnect_attempts"),
         "DICTATION_WS_RECONNECT_DELAY": ("websocket", "reconnect_delay"),
     }
@@ -226,13 +225,16 @@ def validate(config: Config) -> None:
     except (ValueError, TypeError):  # pragma: no cover — defensive, urlparse rarely raises
         errors.append(f"server.url is not a valid URL: {config.server.url!r}")
 
+    # Language code validation (BCP-47 subset: 2-8 letter codes, optional subtags)
+    lang = config.server.language
+    if lang and not re.match(r"^[a-zA-Z]{2,8}(-[a-zA-Z0-9]{1,8})*$", lang):
+        errors.append(
+            f"server.language must be a valid language code (e.g. 'en', 'zh-CN'), "
+            f"got {lang!r}"
+        )
+
     # WebSocket config
     ws = config.websocket
-    if ws.backend not in ("whisperlive", "whisperlivekit"):
-        errors.append(
-            f"websocket.backend must be 'whisperlive' or 'whisperlivekit', "
-            f"got '{ws.backend}'"
-        )
     if ws.reconnect_attempts < 0:
         errors.append(f"websocket.reconnect_attempts must be >= 0, got {ws.reconnect_attempts}")
     if not (0.0 < ws.reconnect_delay <= 30.0):

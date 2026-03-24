@@ -93,7 +93,7 @@ class TestStart:
     @patch("whisper_dictation.daemon.create_ws_engine")
     @patch("whisper_dictation.daemon.notify")
     @patch("whisper_dictation.daemon.create_engine")
-    def test_start_engine_unavailable(self, mock_ws_fn, mock_notify, mock_create):
+    def test_start_engine_unavailable(self, mock_create, mock_notify, mock_ws_fn):
         mock_engine = MagicMock()
         mock_engine.is_available.return_value = False
         mock_create.return_value = mock_engine
@@ -254,37 +254,19 @@ class TestOnActivate:
     @patch("whisper_dictation.daemon.AudioStream")
     @patch("whisper_dictation.daemon.create_ws_engine")
     @patch("whisper_dictation.daemon.create_engine")
-    def test_activate_whisperlive_streaming_enables_server_vad(
-        self, mock_create, mock_ws_cls, mock_audio_cls, mock_notify,
-    ):
-        mock_create.return_value = MagicMock()
-        mock_audio_cls.return_value = MagicMock()
-        mock_ws = MagicMock()
-        mock_ws_cls.return_value = mock_ws
-
-        daemon = DictationDaemon(Config(), streaming=True)
-        daemon._on_activate()
-
-        assert mock_ws_cls.call_args.kwargs["use_vad"] is True
-        mock_ws.connect.assert_called_once()
-
-    @patch("whisper_dictation.daemon.notify")
-    @patch("whisper_dictation.daemon.AudioStream")
-    @patch("whisper_dictation.daemon.create_ws_engine")
-    @patch("whisper_dictation.daemon.create_engine")
-    def test_activate_whisperlivekit_streaming_disables_server_vad(
+    def test_activate_streaming_disables_server_vad(
         self, mock_create, mock_ws_fn, mock_audio_cls, mock_notify,
     ):
+        """Streaming mode creates WS engine and connects."""
         mock_create.return_value = MagicMock()
         mock_audio_cls.return_value = MagicMock()
         mock_ws = MagicMock()
         mock_ws_fn.return_value = mock_ws
 
-        cfg = replace(Config(), websocket=replace(Config().websocket, backend="whisperlivekit"))
-        daemon = DictationDaemon(cfg, streaming=True)
+        daemon = DictationDaemon(Config(), streaming=True)
         daemon._on_activate()
 
-        assert mock_ws_fn.call_args.kwargs["use_vad"] is False
+        mock_ws_fn.assert_called_once()
         mock_ws.connect.assert_called_once()
 
     @patch("whisper_dictation.daemon.notify")
@@ -635,7 +617,7 @@ class TestWebSocketStreaming:
     @patch("whisper_dictation.daemon.AudioStream")
     @patch("whisper_dictation.daemon.create_engine")
     def test_ws_activate_connects(self, mock_create, mock_audio_cls, mock_notify):
-        """WS streaming: activate creates and connects WebSocketEngine."""
+        """WS streaming: activate creates and connects WhisperLiveKitEngine."""
         mock_create.return_value = MagicMock()
         mock_audio_cls.return_value = MagicMock()
         daemon = DictationDaemon(Config(), streaming=True)
@@ -650,9 +632,10 @@ class TestWebSocketStreaming:
     @patch("whisper_dictation.daemon.notify")
     @patch("whisper_dictation.daemon.AudioStream")
     @patch("whisper_dictation.daemon.create_engine")
-    def test_ws_activate_whisperlive_enables_server_vad(
+    def test_ws_activate_passes_on_text_callback(
         self, mock_create, mock_audio_cls, mock_notify,
     ):
+        """WS streaming: activate passes on_text callback to engine factory."""
         mock_create.return_value = MagicMock()
         mock_audio_cls.return_value = MagicMock()
         daemon = DictationDaemon(Config(), streaming=True)
@@ -662,27 +645,7 @@ class TestWebSocketStreaming:
             mock_ws_fn.return_value = mock_ws
             daemon._on_activate()
 
-        assert mock_ws_fn.call_args.kwargs["use_vad"] is True
-
-    @patch("whisper_dictation.daemon.notify")
-    @patch("whisper_dictation.daemon.AudioStream")
-    @patch("whisper_dictation.daemon.create_engine")
-    def test_ws_activate_whisperlivekit_disables_server_vad(
-        self, mock_create, mock_audio_cls, mock_notify,
-    ):
-        mock_create.return_value = MagicMock()
-        mock_audio_cls.return_value = MagicMock()
-        daemon = DictationDaemon(
-            replace(Config(), websocket=replace(Config().websocket, backend="whisperlivekit")),
-            streaming=True,
-        )
-
-        with patch("whisper_dictation.daemon.create_ws_engine") as mock_ws_fn:
-            mock_ws = MagicMock()
-            mock_ws_fn.return_value = mock_ws
-            daemon._on_activate()
-
-        assert mock_ws_fn.call_args.kwargs["use_vad"] is False
+        assert "on_text" in mock_ws_fn.call_args.kwargs
 
     @patch("whisper_dictation.daemon.notify")
     @patch("whisper_dictation.daemon.AudioStream")
@@ -704,7 +667,7 @@ class TestWebSocketStreaming:
 
     @patch("whisper_dictation.daemon.create_engine")
     def test_ws_audio_chunk_sends_to_ws(self, mock_create):
-        """WS streaming: audio chunks are sent to WebSocketEngine."""
+        """WS streaming: audio chunks are sent to WhisperLiveKitEngine."""
         mock_create.return_value = MagicMock()
         daemon = DictationDaemon(Config(), streaming=True)
         daemon._recording = True
@@ -832,7 +795,7 @@ class TestWebSocketStreaming:
     @patch("whisper_dictation.daemon.notify")
     @patch("whisper_dictation.daemon.create_engine")
     def test_stop_closes_ws_engine(self, mock_create, mock_notify):
-        """WS streaming: stop() closes WebSocketEngine."""
+        """WS streaming: stop() closes WhisperLiveKitEngine."""
         mock_create.return_value = MagicMock()
         daemon = DictationDaemon(Config(), streaming=True)
         mock_ws = MagicMock()
