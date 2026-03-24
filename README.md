@@ -103,13 +103,13 @@ No additional system dependencies needed.
 
 ### Option A: WhisperLiveKit server (recommended)
 
-WhisperLiveKit is a pip-installable Whisper server. No Docker required.
+WhisperLiveKit is a separate Whisper transcription server that must be installed and running before starting the dictation client. No Docker required — it's pip/uv installable.
 
 ```bash
-# 1. Install WhisperLiveKit
-uv tool install whisperlivekit       # includes GPU support via faster-whisper
+# 1. Install WhisperLiveKit (separate from the dictation client)
+uv tool install whisperlivekit
 
-# 2. Start the server (Terminal 1)
+# 2. Start the server (Terminal 1) — must be running before the client
 wlk serve --model large-v3 --language en --pcm-input \
   --min-chunk-size 1.5 --confidence-validation
 
@@ -125,6 +125,8 @@ faster-whisper-dictation start --streaming  # real-time streaming mode
 
 # 4. Press Alt+V to start/stop dictation
 ```
+
+> **Note:** The WhisperLiveKit server (`wlk`) and the dictation client (`faster-whisper-dictation`) are installed separately. The server must be running before starting the client. If you see "Server not reachable", make sure `wlk serve` is running in another terminal.
 
 ### Option B: Local engine (no server needed)
 
