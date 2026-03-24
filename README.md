@@ -255,6 +255,7 @@ reconnect_delay = 1.0   # seconds between retries
 | `DICTATION_VAD_MAX_SPEECH_S` | `90.0` | Maximum single utterance duration (s) |
 | `DICTATION_VAD_MODEL_URL` | (pinned release) | Custom Silero VAD ONNX model URL |
 | `DICTATION_VAD_VERIFY_HASH` | `false` | Enable SHA-256 hash verification on model download |
+| `DICTATION_PASTE_DELAY` | `0.15` | Clipboard paste delay in seconds (0.0-10.0) |
 | `DICTATION_WS_RECONNECT_ATTEMPTS` | `3` | WebSocket reconnection attempts |
 | `DICTATION_WS_RECONNECT_DELAY` | `1.0` | Delay between reconnection attempts (s) |
 

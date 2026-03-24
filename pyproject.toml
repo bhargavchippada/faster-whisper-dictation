@@ -38,7 +38,6 @@ dependencies = [
 [project.optional-dependencies]
 local = [
     "faster-whisper>=1.0",
-    "onnxruntime>=1.16",
 ]
 local-gpu = [
     "faster-whisper>=1.0",
@@ -57,6 +56,7 @@ faster-whisper-dictation = "whisper_dictation.cli:main"
 Homepage = "https://github.com/bhargavchippada/faster-whisper-dictation"
 Repository = "https://github.com/bhargavchippada/faster-whisper-dictation"
 Issues = "https://github.com/bhargavchippada/faster-whisper-dictation/issues"
+Changelog = "https://github.com/bhargavchippada/faster-whisper-dictation/releases"
 
 [build-system]
 requires = ["hatchling"]
