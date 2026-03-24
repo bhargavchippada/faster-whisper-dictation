@@ -65,6 +65,7 @@ class EngineConfig:
 
 @dataclass(frozen=True)
 class WebSocketConfig:
+    backend: str = "whisperlive"  # "whisperlive" or "whisperlivekit"
     reconnect_attempts: int = 3
     reconnect_delay: float = 1.0
 
@@ -100,6 +101,7 @@ def _apply_env_overrides(config: Config) -> Config:
         "DICTATION_VAD_SILENCE_MS": ("vad", "silence_ms"),
         "DICTATION_VAD_MIN_SPEECH_MS": ("vad", "min_speech_ms"),
         "DICTATION_VAD_MAX_SPEECH_S": ("vad", "max_speech_s"),
+        "DICTATION_WS_BACKEND": ("websocket", "backend"),
         "DICTATION_WS_RECONNECT_ATTEMPTS": ("websocket", "reconnect_attempts"),
         "DICTATION_WS_RECONNECT_DELAY": ("websocket", "reconnect_delay"),
     }
@@ -130,7 +132,9 @@ def _apply_env_overrides(config: Config) -> Config:
             # Coerce types
             current_val = getattr(current, f.name)
             expected = type(current_val) if current_val is not None else str
-            if isinstance(val, str) and expected in (int, float):
+            if isinstance(val, str) and expected is bool:
+                val = val.lower() in ("1", "true", "yes")
+            elif isinstance(val, str) and expected in (int, float):
                 try:
                     val = expected(val)
                 except (ValueError, TypeError) as exc:
@@ -224,6 +228,11 @@ def validate(config: Config) -> None:
 
     # WebSocket config
     ws = config.websocket
+    if ws.backend not in ("whisperlive", "whisperlivekit"):
+        errors.append(
+            f"websocket.backend must be 'whisperlive' or 'whisperlivekit', "
+            f"got '{ws.backend}'"
+        )
     if ws.reconnect_attempts < 0:
         errors.append(f"websocket.reconnect_attempts must be >= 0, got {ws.reconnect_attempts}")
     if not (0.0 < ws.reconnect_delay <= 30.0):

@@ -331,6 +331,7 @@ compute_type = "auto"                 # "auto", "float16" (GPU), "int8" (CPU)
 device = "auto"                       # "auto", "cuda", "cpu"
 
 [websocket]
+backend = "whisperlive"               # "whisperlive" or "whisperlivekit"
 reconnect_attempts = 3                # Number of reconnection attempts
 reconnect_delay = 1.0                 # Seconds between reconnection attempts
 """
@@ -386,6 +387,11 @@ def cmd_config(args: argparse.Namespace) -> None:
     print(f"  type         = {config.engine.type}")
     print(f"  compute_type = {config.engine.compute_type}")
     print(f"  device       = {config.engine.device}")
+    print()
+    print("[websocket]")
+    print(f"  backend            = {config.websocket.backend}")
+    print(f"  reconnect_attempts = {config.websocket.reconnect_attempts}")
+    print(f"  reconnect_delay    = {config.websocket.reconnect_delay}s")
 
 
 def cmd_devices(args: argparse.Namespace) -> None:
@@ -415,14 +421,14 @@ def cmd_transcribe(args: argparse.Namespace) -> None:
     )
     validate(config)
 
-    from .engine import create_engine
-    from .engine.websocket import WebSocketEngine
+    from .engine import create_engine, create_ws_engine
 
     def _transcribe(audio: np.ndarray, sr: int) -> str:
         """Transcribe via WS batch (server) or REST/local engine."""
         if config.engine.type == "server":
             ws_cfg = config.websocket
-            ws = WebSocketEngine(
+            ws = create_ws_engine(
+                config,
                 server_url=config.server.url,
                 model=config.server.model,
                 language=config.server.language,

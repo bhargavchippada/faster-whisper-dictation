@@ -6,7 +6,7 @@ services:
     ports:
       - "127.0.0.1:9090:9090"   # WebSocket (streaming)
     volumes:
-      - whisper-cache:/root/.cache/whisper-live
+      - faster-whisper-models:/root/.cache/huggingface
     deploy:
       resources:
         reservations:
@@ -14,14 +14,19 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
-    command: >
-      python run_server.py
-        --port 9090
-        --backend faster_whisper
-        -fw Systran/faster-whisper-large-v3
-        --max_clients 4
-        --max_connection_time 600
-        --omp_num_threads 4
+    command:
+      - bash
+      - -c
+      - |
+        python3 -c "
+        p='/app/whisper_live/backend/base.py'; t=open(p).read()
+        old='if self.frames_np is None:\n                continue'
+        new='if self.frames_np is None:\n                time.sleep(0.01)\n                continue'
+        if old in t: open(p,'w').write(t.replace(old,new,1)); print('[patch] Fixed idle CPU busy-wait')
+        "
+        exec python run_server.py --port 9090 --backend faster_whisper -fw Systran/faster-whisper-large-v3 --max_clients 4 --max_connection_time 600 --omp_num_threads 4
 
 volumes:
-  whisper-cache:
+  faster-whisper-models:
+    external: true
+    name: faster-whisper-dictation_faster-whisper-models

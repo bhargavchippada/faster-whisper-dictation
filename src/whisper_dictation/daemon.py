@@ -5,17 +5,21 @@ from __future__ import annotations
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 from .audio import AudioStream
 from .config import Config
-from .engine import TranscriptionEngine, create_engine
-from .engine.websocket import WebSocketEngine
+from .engine import TranscriptionEngine, create_engine, create_ws_engine
 from .hotkey import HotkeyListener
 from .notifier import notify
 from .typer import type_text
 from .vad import SpeechDetector
+
+if TYPE_CHECKING:
+    from .engine.websocket import WebSocketEngine
+    from .engine.whisperlivekit import WhisperLiveKitEngine
 
 log = logging.getLogger(__name__)
 
@@ -35,7 +39,7 @@ class DictationDaemon:
         # WebSocket streaming: server handles VAD, text arrives via callback
         # Local streaming: local VAD splits utterances, REST/local engine transcribes
         self._use_ws = streaming and config.engine.type == "server"
-        self._ws_engine: WebSocketEngine | None = None
+        self._ws_engine: WebSocketEngine | WhisperLiveKitEngine | None = None
 
         # VAD only needed for local-engine streaming or batch mode
         self._vad = SpeechDetector(
@@ -53,6 +57,12 @@ class DictationDaemon:
         self._recorded_chunks: list[np.ndarray] = []
         self._lock = threading.Lock()
         self._transcribe_pool = ThreadPoolExecutor(max_workers=1)
+
+    def _create_ws_engine(
+        self, **kwargs: object,
+    ) -> WebSocketEngine | WhisperLiveKitEngine:
+        """Create the appropriate WS engine based on config.websocket.backend."""
+        return create_ws_engine(self.config, **kwargs)  # type: ignore[return-value]
 
     def _on_audio_chunk(self, audio: np.ndarray) -> None:
         """Called for each audio chunk from the microphone.
@@ -108,10 +118,10 @@ class DictationDaemon:
             log.error("Transcription or typing failed", exc_info=True)
 
     def _transcribe_batch_ws(self, audio: np.ndarray) -> None:
-        """Transcribe via WebSocket batch mode, fall back to REST on failure."""
+        """Transcribe via WebSocket batch mode."""
         try:
             ws_cfg = self.config.websocket
-            ws = WebSocketEngine(
+            ws = self._create_ws_engine(
                 server_url=self.config.server.url,
                 model=self.config.server.model,
                 language=self.config.server.language,
@@ -119,6 +129,11 @@ class DictationDaemon:
                 reconnect_delay=ws_cfg.reconnect_delay,
             )
             text = ws.transcribe_batch(audio, self.config.audio.sample_rate)
+        except Exception:
+            log.error("WS batch transcription failed", exc_info=True)
+            notify("Error", "Transcription failed")
+            return
+        try:
             if text:
                 type_text(text + " ")
                 log.debug("WS batch typed: %d chars", len(text))
@@ -126,8 +141,7 @@ class DictationDaemon:
                 log.info("No speech detected (WS batch)")
                 notify("No speech", "Nothing was transcribed")
         except Exception:
-            log.warning("WS batch failed, falling back to REST", exc_info=True)
-            self._transcribe_and_type(audio)
+            log.error("Typing failed after WS batch transcription", exc_info=True)
 
     def _on_activate(self) -> None:
         """Hotkey pressed — start recording."""
@@ -141,22 +155,22 @@ class DictationDaemon:
                  self._use_ws, self.streaming, self.config.engine.type)
         notify("Recording", "Speak now")
 
+        ws_engine = None
         if self._use_ws:
             ws_cfg = self.config.websocket
-            self._ws_engine = WebSocketEngine(
+            ws_engine = self._create_ws_engine(
                 server_url=self.config.server.url,
                 model=self.config.server.model,
                 language=self.config.server.language,
                 reconnect_attempts=ws_cfg.reconnect_attempts,
                 reconnect_delay=ws_cfg.reconnect_delay,
-                use_vad=True,
+                use_vad=(self.config.websocket.backend == "whisperlive"),
                 on_text=self._on_ws_text,
             )
             try:
-                self._ws_engine.connect()
+                ws_engine.connect()
             except Exception:
                 log.error("WebSocket connection failed", exc_info=True)
-                self._ws_engine = None
                 with self._lock:
                     self._recording = False
                 notify("Error", "WebSocket connection failed")
@@ -164,16 +178,20 @@ class DictationDaemon:
         elif self.streaming:
             self._vad.reset()
 
+        # Set ws_engine under lock before audio starts so callbacks can see it
+        with self._lock:
+            self._ws_engine = ws_engine
+
         audio = AudioStream(self.config.audio, self._on_audio_chunk)
         try:
             audio.start()
         except Exception:
             log.error("Failed to start audio capture", exc_info=True)
             audio.stop()
-            if self._ws_engine is not None:
-                self._ws_engine.close()
-                self._ws_engine = None
+            if ws_engine is not None:
+                ws_engine.close()
             with self._lock:
+                self._ws_engine = None
                 self._recording = False
                 self._audio = None
             notify("Error", "Could not access microphone")
@@ -202,11 +220,20 @@ class DictationDaemon:
             audio.stop()
 
         if self._use_ws and ws_engine is not None:
-            # Streaming WS: flush and wait for final transcription
-            ws_engine.flush()
-            if not ws_engine.wait_for_completion(timeout=5.0):
-                log.debug("WS transcription did not complete within timeout")
-            ws_engine.close()
+            try:
+                # Streaming WS: don't send END_OF_AUDIO — it causes the server
+                # to close the connection before sending pending results.
+                ws_engine.flush(send_eoa=False)
+                if not ws_engine.wait_for_completion(timeout=5.0):
+                    log.debug("WS transcription did not complete within timeout")
+                # Always check for unemitted partial text (server may close
+                # without marking the final segment completed)
+                pending = ws_engine.get_pending_text()
+                if pending:
+                    log.debug("Emitting pending partial text: %s", pending[:80])
+                    self._on_ws_text(pending)
+            finally:
+                ws_engine.close()
         elif self.streaming:
             # Local-engine streaming: flush remaining VAD-buffered speech
             remaining = self._vad.flush()
@@ -226,10 +253,29 @@ class DictationDaemon:
         else:
             notify("Stopped", "No audio recorded")
 
+    def _check_server_available(self) -> bool:
+        """Check if the transcription server is reachable."""
+        # Try REST health check first (works with OpenAI-compatible servers)
+        if self._engine.is_available():
+            return True
+        # Fall back to WebSocket probe (WhisperLive has no /health endpoint)
+        if self.config.engine.type == "server":
+            ws = self._create_ws_engine(
+                server_url=self.config.server.url,
+                model=self.config.server.model,
+                language=self.config.server.language,
+                reconnect_attempts=0,
+                reconnect_delay=self.config.websocket.reconnect_delay,
+            )
+            try:
+                return ws.is_available()
+            finally:
+                ws.close()
+        return False
+
     def start(self) -> None:
         """Start the dictation daemon."""
-        # Verify engine is available
-        if not self._engine.is_available():
+        if not self._check_server_available():
             engine_type = self.config.engine.type
             if engine_type == "server":
                 log.error(
@@ -270,14 +316,15 @@ class DictationDaemon:
         self._running.clear()
         self._stop_event.set()
 
+        # Stop hotkey FIRST to prevent concurrent _on_deactivate from hotkey thread
+        if self._hotkey is not None:
+            self._hotkey.stop()
+            self._hotkey = None
+
         with self._lock:
             should_deactivate = self._recording
         if should_deactivate:
             self._on_deactivate()
-
-        if self._hotkey is not None:
-            self._hotkey.stop()
-            self._hotkey = None
 
         # Capture under lock — _on_deactivate may have already cleared it
         with self._lock:

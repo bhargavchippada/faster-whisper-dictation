@@ -403,3 +403,60 @@ class TestValidate:
         with pytest.raises(ValueError, match="websocket.reconnect_delay"):
             validate(cfg)
 
+    def test_ws_backend_invalid(self):
+        cfg = Config(websocket=WebSocketConfig(backend="unknown"))
+        with pytest.raises(ValueError, match="websocket.backend"):
+            validate(cfg)
+
+
+# ---------------------------------------------------------------------------
+# _apply_env_overrides — bool coercion (config.py line 136)
+# ---------------------------------------------------------------------------
+
+
+class TestApplyEnvOverridesBoolCoercion:
+    """Cover the bool coercion branch in _merge_section.
+
+    No current config section has a bool field, so we force the branch by
+    using object.__setattr__ on a frozen dataclass to make a field's current
+    value a bool.  When the env override provides a string for that field,
+    ``type(current_val) is bool`` is True and the coercion branch fires.
+    """
+
+    def test_bool_coercion_true(self):
+        """String 'true' coerced to True for a bool-typed field."""
+        cfg = Config()
+        # Make hotkey.mode appear as a bool field (current value = False)
+        object.__setattr__(cfg.hotkey, "mode", False)
+
+        with patch.dict("os.environ", {"DICTATION_MODE": "true"}, clear=True):
+            result = _apply_env_overrides(cfg)
+        assert result.hotkey.mode is True
+
+    def test_bool_coercion_false(self):
+        """String 'no' coerced to False for a bool-typed field."""
+        cfg = Config()
+        object.__setattr__(cfg.hotkey, "mode", True)
+
+        with patch.dict("os.environ", {"DICTATION_MODE": "no"}, clear=True):
+            result = _apply_env_overrides(cfg)
+        assert result.hotkey.mode is False
+
+    def test_bool_coercion_one(self):
+        """String '1' coerced to True for a bool-typed field."""
+        cfg = Config()
+        object.__setattr__(cfg.hotkey, "mode", False)
+
+        with patch.dict("os.environ", {"DICTATION_MODE": "1"}, clear=True):
+            result = _apply_env_overrides(cfg)
+        assert result.hotkey.mode is True
+
+    def test_bool_coercion_yes(self):
+        """String 'yes' coerced to True for a bool-typed field."""
+        cfg = Config()
+        object.__setattr__(cfg.hotkey, "mode", False)
+
+        with patch.dict("os.environ", {"DICTATION_MODE": "YES"}, clear=True):
+            result = _apply_env_overrides(cfg)
+        assert result.hotkey.mode is True
+

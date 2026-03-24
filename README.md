@@ -14,10 +14,10 @@ Real-time speech-to-text dictation powered by [faster-whisper](https://github.co
 
 ```
 Microphone ──▶ Silero VAD ──▶ Whisper Server ──▶ Type into focused app
-(sounddevice)  (local)        (REST API)         (platform-native)
+(sounddevice)  (local)        (WebSocket)        (platform-native)
 ```
 
-Audio is captured from your microphone, speech boundaries are detected locally using [Silero VAD](https://github.com/snakers4/silero-vad), each complete utterance is sent to a Whisper server for transcription, and the result is typed into whatever application has focus.
+Audio is captured from your microphone, speech boundaries are detected locally using [Silero VAD](https://github.com/snakers4/silero-vad), each complete utterance is sent to a [WhisperLive](https://github.com/collabora/WhisperLive) server via WebSocket for transcription, and the result is typed into whatever application has focus.
 
 ## Why local Whisper?
 
@@ -42,7 +42,7 @@ Recent live benchmarks on the current build showed the daemon averaging `0.00%` 
 - **Configurable hotkey** — default `Alt+V`, fully customizable
 - **Background daemon** — `start -b` detaches from terminal, logs to file
 - **Cross-platform** — Linux (X11 + Wayland), macOS, Windows
-- **Flexible backend** — works with any OpenAI-compatible STT server (local Docker, remote, Groq, etc.)
+- **Flexible backend** — server mode uses WhisperLive via WebSocket; also works with OpenAI-compatible REST APIs
 - **Local engine fallback** — optional built-in faster-whisper engine, no server needed
 - **Fully offline** — all processing happens on your machine
 - **Privacy-first** — no cloud, no accounts, no telemetry
@@ -197,7 +197,7 @@ Config file location: `~/.config/faster-whisper-dictation/config.toml`
 
 ```toml
 [server]
-url = "http://localhost:10300"
+url = "http://localhost:9090"
 model = "Systran/faster-whisper-large-v3"
 language = "en"
 timeout = 10            # request timeout in seconds
@@ -224,13 +224,17 @@ device = null           # null = system default, or device name/index
 type = "server"         # "server" or "local"
 compute_type = "float16" # "float16" (GPU), "int8" (CPU), "auto"
 device = "auto"          # "auto", "cuda", "cpu"
+
+[websocket]
+reconnect_attempts = 3  # retries on connection failure
+reconnect_delay = 1.0   # seconds between retries
 ```
 
 ### Environment variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `WHISPER_SERVER_URL` | `http://localhost:10300` | Whisper server URL |
+| `WHISPER_SERVER_URL` | `http://localhost:9090` | Whisper server URL |
 | `WHISPER_MODEL` | `Systran/faster-whisper-large-v3` | Model name |
 | `WHISPER_LANG` | `en` | Language code |
 | `WHISPER_TIMEOUT` | `10` | Request timeout (seconds) |
@@ -250,6 +254,8 @@ device = "auto"          # "auto", "cuda", "cpu"
 | `DICTATION_VAD_MAX_SPEECH_S` | `90.0` | Maximum single utterance duration (s) |
 | `DICTATION_VAD_MODEL_URL` | (pinned release) | Custom Silero VAD ONNX model URL |
 | `DICTATION_VAD_VERIFY_HASH` | `false` | Enable SHA-256 hash verification on model download |
+| `DICTATION_WS_RECONNECT_ATTEMPTS` | `3` | WebSocket reconnection attempts |
+| `DICTATION_WS_RECONNECT_DELAY` | `1.0` | Delay between reconnection attempts (s) |
 
 ## Architecture
 
@@ -262,7 +268,8 @@ faster-whisper-dictation/
 │   ├── engine/
 │   │   ├── __init__.py     # create_engine() factory
 │   │   ├── base.py         # TranscriptionEngine ABC
-│   │   ├── server.py       # REST API engine (OpenAI-compatible)
+│   │   ├── server.py       # REST API engine (OpenAI-compatible, fallback)
+│   │   ├── websocket.py    # WebSocket engine (WhisperLive streaming + batch)
 │   │   └── local.py        # Local faster-whisper engine
 │   ├── hotkey/
 │   │   └── listener.py     # pynput + evdev hotkey detection
@@ -270,7 +277,7 @@ faster-whisper-dictation/
 │   ├── vad.py              # Silero VAD (ONNX, SHA-256 verified)
 │   ├── typer.py            # Platform-aware text input (clipboard + paste)
 │   └── notifier.py         # Cross-platform desktop notifications
-├── tests/                  # 342 tests, 100% coverage
+├── tests/                  # 460 tests, 100% coverage
 ├── .github/workflows/      # CI: lint + test on Python 3.10-3.14
 ├── docker-compose.yml      # GPU server
 ├── docker-compose.cpu.yml  # CPU server
@@ -281,10 +288,10 @@ faster-whisper-dictation/
 
 | Mode | Backend | Setup | Best for |
 |------|---------|-------|----------|
-| **Server** (default) | Docker container with [Speaches](https://github.com/speaches-ai/speaches) | `docker compose up -d` | GPU users, shared servers, flexibility |
+| **Server** (default) | Docker container with [WhisperLive](https://github.com/collabora/WhisperLive) via WebSocket | `docker compose up -d` | GPU users, streaming + batch, shared servers |
 | **Local** | Built-in faster-whisper | `pip install "faster-whisper-dictation[local]"` | Simple setup, single-user, offline |
 
-Both engines expose the same interface — the dictation daemon doesn't care where transcription happens.
+Server mode uses WebSocket for both batch and streaming transcription (shared GPU model, lower latency).
 
 ### Platform support
 
@@ -297,15 +304,15 @@ Both engines expose the same interface — the dictation daemon doesn't care whe
 
 ## Docker server
 
-The server component runs [Speaches](https://github.com/speaches-ai/speaches), which provides an OpenAI-compatible transcription API.
+The server component runs [WhisperLive](https://github.com/collabora/WhisperLive), which provides WebSocket-based streaming transcription with GPU acceleration.
 
 | Setting | GPU mode | CPU mode |
 |---------|----------|----------|
 | Compose file | `docker-compose.yml` | `docker-compose.cpu.yml` |
-| Image | `speaches:0.9.0-rc.3-cuda` | `speaches:0.9.0-rc.3-cpu` |
+| Image | `whisperlive-gpu:latest` | `whisperlive-cpu:latest` |
 | Compute | NVIDIA CUDA (float16) | CPU (int8) |
-| Memory | ~600MB VRAM | ~2GB RAM |
-| Port | `10300` (localhost) | `10300` (localhost) |
+| Memory | ~2GB VRAM | ~2GB RAM |
+| Port | `9090` (localhost) | `9090` (localhost) |
 
 ```bash
 docker compose up -d      # start

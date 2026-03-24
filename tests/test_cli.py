@@ -1011,6 +1011,28 @@ class TestCmdTranscribe:
         mock_ws.transcribe_batch.assert_called_once()
         mock_engine.close.assert_called_once()
 
+    def test_transcribe_file_uses_whisperlivekit_backend(self, tmp_path):
+        from whisper_dictation.config import Config, WebSocketConfig
+
+        wav_path = _make_silent_wav(tmp_path)
+        mock_engine = MagicMock()
+        mock_ws = MagicMock()
+        mock_ws.transcribe_batch.return_value = "hello"
+        config = Config(websocket=WebSocketConfig(backend="whisperlivekit"))
+
+        with (
+            patch("whisper_dictation.cli.load_config", return_value=config),
+            patch("whisper_dictation.engine.create_engine", return_value=mock_engine),
+            patch(
+                "whisper_dictation.engine.whisperlivekit.WhisperLiveKitEngine",
+                return_value=mock_ws,
+            ),
+        ):
+            cmd_transcribe(_make_transcribe_args(file=str(wav_path)))
+
+        mock_ws.transcribe_batch.assert_called_once()
+        mock_engine.close.assert_called_once()
+
     def test_transcribe_with_record(self, capsys):
         import numpy as np
 
@@ -1042,6 +1064,8 @@ class TestCmdTranscribe:
 
         mock_engine = MagicMock()
         mock_engine.transcribe.return_value = ""
+        mock_ws = MagicMock()
+        mock_ws.transcribe_batch.return_value = ""
 
         mock_sd = MagicMock()
         mock_sd.rec.return_value = np.zeros((16000, 1), dtype=np.float32)
@@ -1049,6 +1073,7 @@ class TestCmdTranscribe:
         with (
             patch("whisper_dictation.cli.load_config", return_value=Config()),
             patch("whisper_dictation.engine.create_engine", return_value=mock_engine),
+            patch("whisper_dictation.engine.websocket.WebSocketEngine", return_value=mock_ws),
             patch.dict("sys.modules", {"sounddevice": mock_sd}),
             pytest.raises(SystemExit),
         ):
@@ -1095,10 +1120,13 @@ class TestCmdTranscribe:
         wav_path = _make_silent_wav(tmp_path)
         mock_engine = MagicMock()
         mock_engine.transcribe.return_value = ""
+        mock_ws = MagicMock()
+        mock_ws.transcribe_batch.return_value = ""
 
         with (
             patch("whisper_dictation.cli.load_config", return_value=Config()),
             patch("whisper_dictation.engine.create_engine", return_value=mock_engine),
+            patch("whisper_dictation.engine.websocket.WebSocketEngine", return_value=mock_ws),
             pytest.raises(SystemExit),
         ):
             cmd_transcribe(_make_transcribe_args(file=str(wav_path)))
@@ -1320,6 +1348,8 @@ class TestCmdConfig:
         assert "[vad]" in captured.out
         assert "[audio]" in captured.out
         assert "[engine]" in captured.out
+        assert "[websocket]" in captured.out
+        assert "reconnect_attempts" in captured.out
         assert "not found" in captured.out
 
     def test_show_with_existing_config(self, tmp_path, capsys):

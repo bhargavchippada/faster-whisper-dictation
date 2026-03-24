@@ -1,4 +1,4 @@
-"""WebSocket streaming engine — real-time transcription via WhisperLive server."""
+"""WhisperLiveKit streaming engine — real-time transcription via WhisperLiveKit server."""
 
 from __future__ import annotations
 
@@ -10,10 +10,9 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlencode, urlparse, urlunparse
 
 import numpy as np
-import websockets.exceptions as ws_exceptions
 import websockets.sync.client as ws_sync
 
 log = logging.getLogger(__name__)
@@ -21,21 +20,21 @@ log = logging.getLogger(__name__)
 # Max queued audio frames before dropping (~3s at 32ms chunks)
 _MAX_SEND_QUEUE = 100
 
-# Sentinel for END_OF_AUDIO signal in the send queue
+# Sentinel for end-of-audio signal in the send queue
 _END_SENTINEL = object()
 
 # Chunk size for batch mode audio splitting (32ms at 16kHz = 512 samples)
 _BATCH_CHUNK_SAMPLES = 512
 
-# Max segments collected in batch mode to prevent unbounded memory
-_MAX_BATCH_SEGMENTS = 1000
+# Max lines collected in batch mode to prevent unbounded memory
+_MAX_BATCH_LINES = 1000
 
 # Max incoming WS message size before discarding (1 MB)
 _MAX_MESSAGE_BYTES = 1 * 1024 * 1024
 
 
-def _http_to_ws_url(http_url: str) -> str:
-    """Convert http(s):// URL to ws(s):// URL.
+def _http_to_ws_url(http_url: str, *, path: str = "/asr", language: str = "en") -> str:
+    """Convert http(s):// URL to ws(s):// URL with /asr path and language query param.
 
     Raises ValueError if scheme is not http or https.
     """
@@ -45,7 +44,10 @@ def _http_to_ws_url(http_url: str) -> str:
             f"server_url must use http or https, got {parsed.scheme!r}"
         )
     scheme = "wss" if parsed.scheme == "https" else "ws"
-    return urlunparse(parsed._replace(scheme=scheme))
+    # Append /asr path and language query param
+    new_path = parsed.path.rstrip("/") + path
+    query = urlencode({"language": language})
+    return urlunparse(parsed._replace(scheme=scheme, path=new_path, query=query))
 
 
 def _is_loopback(url: str) -> bool:
@@ -60,35 +62,20 @@ def _is_loopback(url: str) -> bool:
         return False
 
 
-def _build_config_message(
-    *,
-    uid: str,
-    language: str = "en",
-    model: str = "small",
-    use_vad: bool = True,
-) -> dict[str, str | bool]:
-    """Build the WhisperLive handshake config message."""
-    return {
-        "uid": uid,
-        "language": language,
-        "task": "transcribe",
-        "model": model,
-        "use_vad": use_vad,
-    }
+def _audio_to_int16_bytes(audio: np.ndarray) -> bytes:
+    """Convert audio to int16 (s16le) PCM bytes for WhisperLiveKit.
 
-
-def _audio_to_float32_bytes(audio: np.ndarray) -> bytes:
-    """Convert audio to float32 PCM bytes for WhisperLive.
-
-    WhisperLive expects raw float32 PCM at 16kHz mono as binary WS frames.
+    WhisperLiveKit expects raw int16 PCM at 16kHz mono as binary WS frames.
     """
+    if audio.dtype == np.int16:
+        return audio.tobytes()
     if audio.dtype in (np.float32, np.float64):
-        return audio.astype(np.float32).tobytes()
-    return (audio.astype(np.float32) / 32768.0).tobytes()
+        return np.clip(audio * 32767.0, -32768, 32767).astype(np.int16).tobytes()
+    return (audio.astype(np.float32) / 32768.0 * 32767.0).astype(np.int16).tobytes()
 
 
-class WebSocketEngine:
-    """Real-time streaming and batch transcription via WhisperLive WebSocket.
+class WhisperLiveKitEngine:
+    """Real-time streaming and batch transcription via WhisperLiveKit WebSocket.
 
     Supports two modes:
     - Streaming: connect() → send_audio() per chunk → flush() → close()
@@ -96,13 +83,13 @@ class WebSocketEngine:
     - Batch: transcribe_batch(audio) → returns full text synchronously.
       Connects, sends all audio, waits for completion, returns text.
 
-    Protocol (WhisperLive):
-    1. Connect to ws://<host>:<port>
-    2. Send JSON config message (uid, language, model, use_vad)
-    3. Wait for SERVER_READY
-    4. Stream audio as binary float32 frames
-    5. Receive JSON segments with completed/partial flags
-    6. Send END_OF_AUDIO text frame when done
+    Protocol (WhisperLiveKit):
+    1. Connect to ws://<host>:<port>/asr?language=<lang>
+    2. Server sends config message first (no client handshake needed)
+    3. Stream audio as binary int16 (s16le) frames
+    4. Receive JSON with "lines" (completed) and "buffer_transcription" (partial)
+    5. Send empty frame b"" to signal end of audio
+    6. Server sends {"type": "ready_to_stop"} when done
 
     Thread safety: public methods (connect, send_audio, flush, close) are safe
     to call from one caller thread. The receiver and sender threads run
@@ -126,11 +113,14 @@ class WebSocketEngine:
         self._language = language
         if reconnect_attempts < 0:
             raise ValueError("reconnect_attempts must be >= 0")
-        self._reconnect_attempts = reconnect_attempts
         if reconnect_delay <= 0:
             raise ValueError("reconnect_delay must be > 0")
+        self._reconnect_attempts = reconnect_attempts
         self._reconnect_delay = reconnect_delay
-        self._use_vad = use_vad
+        # use_vad is accepted but ignored — WhisperLiveKit has no client
+        # handshake to send VAD preferences. Kept for API parity with
+        # WebSocketEngine so the daemon factory can pass identical kwargs.
+        del use_vad
         self._on_text = on_text or (lambda t: None)
         self._uid = str(uuid.uuid4())
 
@@ -142,32 +132,32 @@ class WebSocketEngine:
         self._receiver_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._connected = threading.Event()
-        self._server_ready = threading.Event()
         self._flush_done = threading.Event()
+        self._eoa_sent = False
 
-        # Lock protects shared state between caller and receiver threads:
-        # _emitted_count, _batch_collected, _latest_full_text, _eoa_sent.
+        # Lock protects _emitted_count and _batch_collected which are
+        # shared between the caller thread and the receiver thread.
         self._seg_lock = threading.Lock()
         self._emitted_count = 0
         self._batch_collected: list[str] | None = None
         self._latest_full_text: str = ""
-        self._eoa_sent = False  # guards _flush_done to avoid premature signalling
 
     @property
     def ws_url(self) -> str:
-        """Construct the WebSocket URL."""
-        return _http_to_ws_url(self._server_url)
+        """Construct the WebSocket URL with /asr path and language query param."""
+        return _http_to_ws_url(
+            self._server_url, path="/asr", language=self._language,
+        )
 
     def connect(self, *, use_vad: bool | None = None) -> None:
-        """Open WebSocket connection with retry, send config, start threads.
+        """Open WebSocket connection with retry, receive server config, start threads.
 
         Args:
-            use_vad: Override the instance's use_vad for this connection.
-                If None, uses the value from __init__.
+            use_vad: Accepted for API compatibility but not sent to WhisperLiveKit
+                (no client handshake). Ignored.
         """
         self._stop_event.clear()
         self._connected.clear()
-        self._server_ready.clear()
         self._flush_done.clear()
         # Drain stale data from previous session
         while not self._send_queue.empty():
@@ -182,7 +172,8 @@ class WebSocketEngine:
             self._eoa_sent = False
         self._uid = str(uuid.uuid4())
 
-        if not _is_loopback(self._server_url) and self.ws_url.startswith("ws://"):
+        ws_url = self.ws_url
+        if not _is_loopback(self._server_url) and ws_url.startswith("ws://"):
             log.warning(
                 "WebSocket to non-localhost %s uses unencrypted ws://. "
                 "Consider https:// (wss://) for remote servers.",
@@ -194,7 +185,7 @@ class WebSocketEngine:
 
         for attempt in range(attempts):
             try:
-                self._ws = ws_sync.connect(self.ws_url, max_size=_MAX_MESSAGE_BYTES)
+                self._ws = ws_sync.connect(ws_url, max_size=_MAX_MESSAGE_BYTES)
                 break
             except Exception as e:
                 last_error = e
@@ -206,69 +197,59 @@ class WebSocketEngine:
                     time.sleep(self._reconnect_delay)
 
         if self._ws is None:
-            log.error("WebSocket connection failed after %d attempts: %s", attempts, self.ws_url)
+            log.error("WebSocket connection failed after %d attempts: %s", attempts, ws_url)
             raise last_error  # type: ignore[misc]
 
         try:
-            # Start threads BEFORE sending config so the receiver is ready
-            # to catch SERVER_READY immediately.
+            # Start threads — receiver will pick up the server's initial config message
             self._receiver_thread = threading.Thread(target=self._receiver_loop, daemon=True)
             self._receiver_thread.start()
             self._sender_thread = threading.Thread(target=self._sender_loop, daemon=True)
             self._sender_thread.start()
 
-            effective_vad = self._use_vad if use_vad is None else use_vad
-            config_msg = _build_config_message(
-                uid=self._uid, language=self._language,
-                model=self._model, use_vad=effective_vad,
-            )
-            self._ws.send(json.dumps(config_msg))
-
-            if not self._server_ready.wait(timeout=60.0):
-                log.warning("WhisperLive did not send SERVER_READY within 60s, proceeding anyway")
-
+            # No client handshake — server sends config first (handled by receiver).
+            # WhisperLiveKit is ready to accept audio immediately after connect.
             self._connected.set()
-            log.info("WebSocket connected: %s (uid=%s)", self.ws_url, self._uid[:8])
+            log.info("WhisperLiveKit connected: %s (uid=%s)", ws_url, self._uid[:8])
         except Exception:
             self.close()
             raise
 
     def send_audio(self, audio: np.ndarray) -> None:
-        """Queue audio for sending. Thread-safe, non-blocking.
-
-        Drops chunks when the queue is full (acceptable for streaming
-        where realtime matters more than completeness).
-        """
+        """Queue audio for sending. Thread-safe, non-blocking."""
         if not self._connected.is_set():
             return
         try:
-            self._send_queue.put_nowait(_audio_to_float32_bytes(audio))
+            self._send_queue.put_nowait(_audio_to_int16_bytes(audio))
         except queue.Full:
             log.debug("Send queue full, dropping audio chunk")
 
     def _send_audio_blocking(self, audio: np.ndarray) -> None:
         """Queue audio with blocking put. Used by batch mode to avoid drops.
 
-        Retries with 0.5s intervals, checking _connected between retries
-        so a dead sender thread doesn't block the caller for the full timeout.
+        Checks _stop_event between retries to avoid hanging if the sender
+        thread has died (e.g. connection drop mid-batch).
         """
-        data = _audio_to_float32_bytes(audio)
-        while self._connected.is_set():
+        if not self._connected.is_set():
+            return
+        data = _audio_to_int16_bytes(audio)
+        while not self._stop_event.is_set():
             try:
                 self._send_queue.put(data, timeout=0.5)
                 return
             except queue.Full:
                 continue
-        log.debug("Send aborted: not connected")
 
     def flush(self, *, send_eoa: bool = True) -> None:
         """Signal end of audio stream.
 
         Args:
-            send_eoa: If True, send END_OF_AUDIO frame to the server.
-                For batch mode this triggers server-side finalization.
-                For streaming mode, set False to avoid the server closing
-                the connection before sending pending transcription results.
+            send_eoa: If True, send empty frame to signal end of audio.
+                WhisperLiveKit uses b"" as the end-of-audio marker and
+                responds with ready_to_stop when done. For streaming mode,
+                set False to keep the connection alive for pending results;
+                wait_for_completion() will time out and get_pending_text()
+                provides the fallback.
         """
         if not self._connected.is_set():
             return
@@ -281,7 +262,7 @@ class WebSocketEngine:
             except queue.Full:
                 with self._seg_lock:
                     self._eoa_sent = False
-                log.warning("Send queue full, END_OF_AUDIO dropped")
+                log.warning("Send queue full, end-of-audio dropped")
 
     def wait_for_completion(self, timeout: float = 5.0) -> bool:
         """Wait for server to finish processing after flush."""
@@ -290,12 +271,11 @@ class WebSocketEngine:
     def transcribe_batch(self, audio: np.ndarray, sample_rate: int = 16000) -> str:
         """Transcribe audio synchronously via WebSocket (batch mode).
 
-        Connects with use_vad=True (WhisperLive's VAD detects speech
-        boundaries), sends all audio in chunks, sends END_OF_AUDIO, waits
-        for completed segments, returns concatenated text.
+        Connects, sends all audio in chunks, sends end-of-audio, waits for
+        ready_to_stop, returns concatenated text.
         """
         try:
-            self.connect(use_vad=True)
+            self.connect(use_vad=False)
 
             # Set AFTER connect() which resets _batch_collected to None
             with self._seg_lock:
@@ -315,7 +295,7 @@ class WebSocketEngine:
             except queue.Full:
                 with self._seg_lock:
                     self._eoa_sent = False
-                log.warning("Send queue full, END_OF_AUDIO not sent")
+                log.warning("Send queue full, end-of-audio not sent")
 
             duration = len(audio) / sample_rate
             timeout = max(30.0, duration * 2.0)
@@ -326,11 +306,9 @@ class WebSocketEngine:
                 collected = list(self._batch_collected or [])
                 fallback = self._latest_full_text
             text = " ".join(collected).strip()
-            # If no completed segments, use the latest partial text
-            # (WhisperLive may not mark the last segment completed)
             return text if text else fallback
         except Exception:
-            log.error("Batch WS transcription failed", exc_info=True)
+            log.error("Batch WLK transcription failed", exc_info=True)
             raise
         finally:
             self.close()
@@ -350,7 +328,6 @@ class WebSocketEngine:
             pass
 
         # Join threads BEFORE closing socket so sender can finish
-        # any pending END_OF_AUDIO frame.
         self._join_thread(self._sender_thread, "sender")
         self._sender_thread = None
 
@@ -371,7 +348,7 @@ class WebSocketEngine:
             except queue.Empty:
                 break
 
-        log.info("WebSocket closed")
+        log.info("WhisperLiveKit closed")
 
     def _join_thread(self, thread: threading.Thread | None, name: str) -> None:
         """Join a started thread without raising on synthetic/unstarted test threads."""
@@ -381,16 +358,15 @@ class WebSocketEngine:
             if thread.ident is not None or thread.is_alive():
                 thread.join(timeout=2.0)
                 if thread.is_alive():
-                    log.warning("WebSocket %s thread did not exit within timeout", name)
+                    log.warning("WLK %s thread did not exit within timeout", name)
         except RuntimeError:
-            log.debug("WebSocket %s thread was never started", name)
+            log.debug("WLK %s thread was never started", name)
 
     def get_pending_text(self) -> str:
         """Return unemitted partial text, if any.
 
-        Returns the full text from all segments (including partials)
-        only when no completed segments have been emitted yet. This
-        prevents double-typing when the timeout fallback fires.
+        Returns the full text (lines + buffer) only when no completed
+        lines have been emitted yet. Prevents double-typing.
         """
         with self._seg_lock:
             if self._emitted_count > 0:
@@ -398,7 +374,7 @@ class WebSocketEngine:
             return self._latest_full_text
 
     def is_available(self) -> bool:
-        """Check if the WhisperLive server is reachable."""
+        """Check if the WhisperLiveKit server is reachable."""
         try:
             with ws_sync.connect(self.ws_url, close_timeout=3, open_timeout=3):
                 return True
@@ -422,16 +398,15 @@ class WebSocketEngine:
 
             try:
                 if data is _END_SENTINEL:
-                    ws.send(b"END_OF_AUDIO")
+                    ws.send(b"")  # WhisperLiveKit EOA = empty frame
                 else:
                     ws.send(data)
             except Exception:
                 log.debug("WebSocket send failed", exc_info=True)
-                self._connected.clear()  # unblock _send_audio_blocking callers
                 break
 
     def _receiver_loop(self) -> None:
-        """Receive JSON messages from WhisperLive and dispatch."""
+        """Receive JSON messages from WhisperLiveKit and dispatch."""
         while not self._stop_event.is_set():
             ws = self._ws
             if ws is None:
@@ -441,24 +416,17 @@ class WebSocketEngine:
                 raw = ws.recv(timeout=0.5)
             except TimeoutError:
                 continue
-            except ws_exceptions.ConnectionClosedOK:
-                log.debug("WebSocket closed normally by server")
-                with self._seg_lock:
-                    should_signal = self._eoa_sent
-                if should_signal:
-                    self._flush_done.set()
-                break
             except Exception:
                 if not self._stop_event.is_set():
                     log.debug("WebSocket recv error", exc_info=True)
                 break
 
             if isinstance(raw, bytes):
-                log.debug("WS binary frame ignored (%d bytes)", len(raw))
+                log.debug("WLK binary frame ignored (%d bytes)", len(raw))
                 continue
 
             if isinstance(raw, str) and len(raw) > _MAX_MESSAGE_BYTES:
-                log.warning("WS message too large (%d bytes), skipping", len(raw))
+                log.warning("WLK message too large (%d bytes), skipping", len(raw))
                 continue
 
             try:
@@ -470,82 +438,76 @@ class WebSocketEngine:
             try:
                 self._handle_message(msg)
             except Exception:
-                log.warning("Error handling WS message", exc_info=True)
+                log.warning("Error handling WLK message", exc_info=True)
 
     def _handle_message(self, msg: dict[str, object]) -> None:
-        """Process a WhisperLive JSON message."""
+        """Process a WhisperLiveKit JSON message."""
         if not isinstance(msg, dict):
             return
 
-        if msg.get("message") == "SERVER_READY":
-            log.debug("WS server ready (backend=%s)", msg.get("backend", "?"))
-            self._server_ready.set()
+        # Server initial config message (informational)
+        if msg.get("type") == "config":
+            log.debug("WLK server config: %s", str(msg)[:200])
             return
 
-        if msg.get("status") == "WAIT":
-            log.warning("WS server busy, wait %s minutes", msg.get("message", "?"))
-            return
-
-        segments = msg.get("segments")
-        if isinstance(segments, list):
-            self._process_segments(segments)
-            return
-
-        if "language" in msg and "language_prob" in msg:
-            try:
-                prob = float(msg["language_prob"]) * 100
-                log.debug("WS detected language: %s (%.0f%%)", msg["language"], prob)
-            except (TypeError, ValueError):
-                log.debug("WS language detection: %s", msg.get("language"))
-            return
-
-        log.debug("WS unhandled message: %s", str(msg)[:200])
-
-    def _process_segments(self, segments: list) -> None:
-        """Process transcription segments and emit text.
-
-        Strategy: emit completed segments immediately. Also track the full
-        text from all segments (including partial) so we can emit remaining
-        text when the session ends (WhisperLive may not mark the last segment
-        completed until more audio arrives).
-        """
-        valid = [s for s in segments if isinstance(s, dict)]
-        if not valid:
-            return
-
-        completed = [s for s in valid if s.get("completed", False)]
-
-        # Compute full text outside the lock (string join can be slow)
-        full_text = " ".join(s.get("text", "").strip() for s in valid).strip()
-
-        # Collect texts to emit outside the lock (on_text may be slow)
-        texts_to_emit: list[str] = []
-
-        with self._seg_lock:
-            new_completed = completed[self._emitted_count:]
-            self._emitted_count = max(self._emitted_count, len(completed))
-            collected = self._batch_collected  # local for type narrowing
-            self._latest_full_text = full_text
-
-            for seg in new_completed:
-                text = seg.get("text", "").strip()
-                if text:
-                    log.debug("WS text (final): %s", text[:80])
-                    if collected is not None:
-                        if len(collected) < _MAX_BATCH_SEGMENTS:
-                            collected.append(text)
-                    else:
-                        texts_to_emit.append(text)
-
-        # Emit streaming callbacks outside the lock
-        for text in texts_to_emit:
-            self._on_text(text)
-
-        # Only signal completion after EOA has been sent, to avoid
-        # premature signalling on intermediate completed segments.
-        last_seg = valid[-1]
-        if last_seg.get("completed", False):
+        # Server signals transcription complete
+        if msg.get("type") == "ready_to_stop":
+            log.debug("WLK server ready to stop")
             with self._seg_lock:
                 should_signal = self._eoa_sent
             if should_signal:
                 self._flush_done.set()
+            return
+
+        # Transcription response: lines (completed) + buffer_transcription (partial)
+        lines = msg.get("lines")
+        buffer_text = msg.get("buffer_transcription")
+        if isinstance(lines, list) or isinstance(buffer_text, str):
+            self._process_response(
+                lines=lines if isinstance(lines, list) else [],
+                buffer_text=buffer_text if isinstance(buffer_text, str) else "",
+            )
+            return
+
+        log.debug("WLK unhandled message: %s", str(msg)[:200])
+
+    def _process_response(
+        self, lines: list[dict[str, object]], buffer_text: str,
+    ) -> None:
+        """Process WhisperLiveKit transcription response.
+
+        Args:
+            lines: List of completed line dicts, each with "text" key.
+            buffer_text: Current partial/in-progress transcription text.
+        """
+        valid_lines = [ln for ln in lines if isinstance(ln, dict)]
+
+        # Build full text from all lines + buffer
+        line_texts = [ln.get("text", "").strip() for ln in valid_lines]
+        all_text_parts = [t for t in line_texts if t]
+        if buffer_text.strip():
+            all_text_parts.append(buffer_text.strip())
+        full_text = " ".join(all_text_parts)
+
+        # Collect texts to emit outside the lock (on_text and log may be slow)
+        texts_to_emit: list[str] = []
+
+        with self._seg_lock:
+            new_lines = valid_lines[self._emitted_count:]
+            self._emitted_count = max(self._emitted_count, len(valid_lines))
+            collected = self._batch_collected  # local for type narrowing
+            self._latest_full_text = full_text
+
+            for ln in new_lines:
+                text = ln.get("text", "").strip()
+                if text:
+                    if collected is not None:
+                        if len(collected) < _MAX_BATCH_LINES:
+                            collected.append(text)
+                    else:
+                        texts_to_emit.append(text)
+
+        # Emit streaming callbacks and log outside the lock
+        for text in texts_to_emit:
+            log.debug("WLK text (line): %s", text[:80])
+            self._on_text(text)
