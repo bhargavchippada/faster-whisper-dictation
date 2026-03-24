@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Speech-to-text dictation tool. Captures microphone audio, detects speech boundaries via Silero VAD, transcribes via faster-whisper (WebSocket, REST API, or local), and types text into the focused application. Supports batch mode (default, highest accuracy) and streaming mode (experimental, real-time). Server mode uses WhisperLiveKit via WebSocket for both batch and streaming. Cross-platform (Linux X11/Wayland, macOS, Windows).
+Speech-to-text dictation tool. Captures microphone audio, detects speech boundaries via Silero VAD, transcribes via faster-whisper (WebSocket, REST API, or local), and types text into the focused application. Supports batch mode (default, highest accuracy) and streaming mode (real-time). Server mode uses WhisperLiveKit via WebSocket for both batch and streaming. Cross-platform (Linux X11/Wayland, macOS, Windows).
 
 ## Architecture
 
@@ -41,7 +41,7 @@ src/whisper_dictation/
 - **Thread safety in WS engine**: `_seg_lock` protects `_latest_full_text`, `_streamed_stable_text`, and `_eoa_sent` shared between caller and receiver threads. `_END_SENTINEL = object()` uses identity check (`is`) not equality. Sender/receiver thread death sets `_stop_event` and `_flush_done` to unblock callers.
 - **Word-boundary streaming emission**: `_process_response` emits only complete words (up to the last space via `rfind(" ")`). Buffer text (`buffer_transcription`) is excluded from streaming emission (unstable/partial). `startswith()` detects append-only growth vs in-place revision. Revision suppresses emission and resyncs the cursor. Trailing partial word emitted on deactivation via `get_pending_text()`.
 - **Time-based trailing word flush**: `_maybe_flush_pending_word()` emits the held trailing word after 1.5s of inactivity (`_WORD_FLUSH_TIMEOUT_S`). Runs in the receiver loop after every message (WLK sends ~20/sec). Only flushes from `_last_stable_text` (not buffer). `_last_stable_change` timestamp resets only when `full_text` actually changes (not on identical repeated responses). `_pending_word_flushed` flag prevents double-emission.
-- **Batch over streaming**: Batch mode sends complete utterances for transcription (highest accuracy). Streaming mode (`--streaming`) is experimental — sends partial audio chunks for real-time output but with lower quality. In server mode, both paths use WebSocket (WhisperLiveKit).
+- **Batch over streaming**: Batch mode sends complete utterances for transcription (highest accuracy). Streaming mode (`--streaming`) sends audio in real-time for live text output — best with fast, continuous speech. In server mode, both paths use WebSocket (WhisperLiveKit).
 - **Background daemon**: `start -b` uses Unix double-fork (`_daemonize()`) to detach from terminal. Follows Stevens APUE: setsid, chdir("/"), closerange, O_APPEND log, O_CLOEXEC. Logs to `~/.config/faster-whisper-dictation/daemon.log`.
 
 ## Server Setup

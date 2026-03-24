@@ -46,7 +46,7 @@ Recent live benchmarks on the current build showed the daemon averaging `0.00%` 
 - **Local engine fallback** -- optional built-in faster-whisper engine, no server needed
 - **Fully offline** -- all processing happens on your machine
 - **Privacy-first** -- no cloud, no accounts, no telemetry
-- **Streaming mode** *(experimental)* -- `--streaming` sends partial audio for real-time text; quality depends on server tuning (see [Streaming mode](#streaming-mode) below)
+- **Streaming mode** -- `--streaming` sends audio in real-time for live text output; best with fast, continuous speech (see [Streaming mode](#streaming-mode) below)
 
 ## Install
 
@@ -385,11 +385,41 @@ faster-whisper-dictation start --server-url https://api.groq.com/openai
 
 The default settings are tuned for accurate dictation out of the box. Whisper `large-v3` handles punctuation and capitalization well without any prompt.
 
+### Batch vs streaming
+
+| | Batch (default) | Streaming (`--streaming`) |
+|---|---|---|
+| **How it works** | Record full utterance → send all audio → type result | Send audio in real-time → type words as they arrive |
+| **Accuracy** | Excellent — full audio context | Good for fast speech, weaker for slow/paused speech |
+| **Latency** | Wait until you stop speaking | ~1.5s behind real-time |
+| **Best for** | Careful dictation, slow speech, accuracy-first | Fast continuous dictation, real-time feedback |
+
+**Recommendation:** Start with batch mode. Switch to streaming only if you need real-time feedback and speak at a natural-to-fast pace.
+
+### Tuning tips
+
+- **`server.hotwords`** — Comma-separated list of words to boost recognition. Useful for proper nouns, technical terms, or words Whisper frequently gets wrong. Example: `"FastAPI,PyTorch,Kubernetes,streaming,toggle"`.
 - **`server.prompt`** — Empty by default. Whisper treats this as **text to emulate** (not instructions). Use it for domain vocabulary, e.g. `"We deployed the Kubernetes cluster and updated the Docker containers."` — this helps the model recognize specific terms. Do **not** write instructions like "Use proper punctuation" — Whisper will misinterpret them and produce worse output.
 - **`server.temperature`** — Defaults to `0.0` (most deterministic). Higher values (0.2-0.5) produce more varied output but less accurate transcription.
-- **`server.hotwords`** — Comma-separated list of words to boost recognition. Useful for proper nouns, technical terms, or words Whisper frequently gets wrong (e.g. `"FastAPI,PyTorch,Kubernetes"`).
 - **`vad.threshold`** — Defaults to `0.6`. Controls how aggressively Silero VAD detects speech. Higher values (0.7-0.8) reduce false triggers from background noise but may clip quiet speech. Lower values (0.3-0.5) are more sensitive.
 - **`vad.silence_ms`** — Defaults to `200`. How long to wait after speech stops before considering the utterance complete. Increase to `500-800` if your speech has natural pauses that get cut off.
+
+### Model selection
+
+| Model | Size | Speed | Accuracy | VRAM |
+|-------|------|-------|----------|------|
+| `large-v3` | 3GB | Slower | Best | ~3GB |
+| `large-v3-turbo` | 1.6GB | Fast | Very good | ~2GB |
+| `medium` | 1.5GB | Fast | Good | ~2GB |
+| `small` | 500MB | Very fast | Acceptable | ~1GB |
+
+Use `large-v3` for best quality (default). Use `large-v3-turbo` for a good speed/quality balance. Smaller models are faster but less accurate, especially for accented speech or technical vocabulary.
+
+```bash
+# Example: use turbo model for faster processing
+wlk serve --model large-v3-turbo --language en --pcm-input \
+  --min-chunk-size 1.5 --confidence-validation
+```
 
 ## Streaming mode
 
@@ -437,6 +467,14 @@ faster-whisper-dictation start --streaming --mode hold
 | Slow with pauses | Acceptable | Some words may be delayed; batch mode is better for this |
 
 **Recommendation:** Use batch mode (default, no `--streaming`) for highest accuracy. Streaming is best for fast, continuous dictation where real-time feedback matters.
+
+### Tips for best results
+
+- **Speak at a natural pace** — streaming quality improves significantly with continuous speech vs. slow, fragmented speech with long pauses
+- **Use a good microphone** — a headset or close-range mic reduces background noise and improves recognition
+- **Set hotwords** for domain-specific vocabulary you use frequently (`server.hotwords` in config)
+- **Restart the WLK server** if quality degrades after extended use — each new WebSocket session gets fresh state, but the server process benefits from a periodic restart
+- **Use batch mode for important text** — switch between streaming (fast drafts) and batch (accurate final text) depending on the task
 
 ### Linux: hold mode requires evdev
 
