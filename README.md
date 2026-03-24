@@ -279,7 +279,7 @@ faster-whisper-dictation/
 │   ├── vad.py              # Silero VAD (ONNX, SHA-256 verified)
 │   ├── typer.py            # Platform-aware text input (clipboard + paste)
 │   └── notifier.py         # Cross-platform desktop notifications
-├── tests/                  # 478 tests, 100% coverage
+├── tests/                  # 480 tests, 99% coverage
 ├── .github/workflows/      # CI: lint + test on Python 3.10-3.14
 └── pyproject.toml          # Package config (uv/pip installable)
 ```
@@ -322,14 +322,17 @@ pip install whisperlivekit[gpu]
 
 ```bash
 # Basic usage
-wlk --model large-v3 --language en
-
-# With PCM input (used by the dictation client)
 wlk --model large-v3 --language en --pcm-input
 
+# If CUDA 12 libs are not in default path (e.g. system has CUDA 13):
+LD_LIBRARY_PATH=/usr/local/lib/ollama/cuda_v12:$LD_LIBRARY_PATH \
+  wlk serve --model large-v3 --language en --pcm-input
+
 # Specify host and port
-wlk --model large-v3 --language en --host 0.0.0.0 --port 8000
+wlk --model large-v3 --language en --pcm-input --host 0.0.0.0 --port 8000
 ```
+
+> **CUDA 12 required:** WhisperLiveKit's faster-whisper backend needs `libcublas.so.12`. If your system has CUDA 13+, set `LD_LIBRARY_PATH` to include CUDA 12 libraries. Without this, the model loads but silently produces empty transcriptions.
 
 ### Server capabilities
 

@@ -36,7 +36,7 @@ src/whisper_dictation/
 - **Non-blocking notifications**: `subprocess.Popen` (not `.run`) for Linux/macOS so notifications never block the daemon.
 - **Persistent HTTP session in server mode**: `ServerEngine` reuses a `requests.Session` to reduce per-request overhead when talking to the local STT server.
 - **WhisperLiveKit WebSocket engine**: `WhisperLiveKitEngine` handles both streaming (real-time callbacks) and batch (synchronous) transcription via WhisperLiveKit's protocol (no client handshake, int16 PCM audio, `ready_to_stop` completion signal). Does NOT extend `TranscriptionEngine` ABC (async push model vs sync request/response).
-- **Thread safety in WS engine**: `_seg_lock` protects `_emitted_count`, `_batch_collected`, and `_latest_full_text` shared between caller and receiver threads. `on_text` callbacks are called outside the lock to prevent deadlocks. `_END_SENTINEL = object()` uses identity check (`is`) not equality.
+- **Thread safety in WS engine**: `_seg_lock` protects `_latest_full_text` shared between caller and receiver threads. `_END_SENTINEL = object()` uses identity check (`is`) not equality. Sender/receiver thread death sets `_stop_event` and `_flush_done` to unblock callers.
 - **Batch over streaming**: Batch mode sends complete utterances for transcription (highest accuracy). Streaming mode (`--streaming`) is experimental — sends partial audio chunks for real-time output but with lower quality. In server mode, both paths use WebSocket (WhisperLiveKit).
 - **Background daemon**: `start -b` uses Unix double-fork (`_daemonize()`) to detach from terminal. Follows Stevens APUE: setsid, chdir("/"), closerange, O_APPEND log, O_CLOEXEC. Logs to `~/.config/faster-whisper-dictation/daemon.log`.
 
@@ -71,7 +71,7 @@ LD_LIBRARY_PATH=/usr/local/lib/ollama/cuda_v12:$LD_LIBRARY_PATH \
 - **AppleScript sanitization**: Notification messages strip null bytes and control characters before interpolation into AppleScript strings.
 - **WebSocket URL validation**: `_http_to_ws_url()` rejects non-http/https schemes with ValueError. `_is_loopback()` uses `ipaddress.ip_address().is_loopback` for full IPv4/v6 range. Unencrypted `ws://` to non-loopback triggers a warning.
 - **WS message size cap**: `_MAX_MESSAGE_BYTES = 1MB` enforced at both websockets library level (`max_size`) and application level. Prevents memory exhaustion from malicious server responses.
-- **WS batch segment cap**: `_MAX_BATCH_SEGMENTS = 1000` prevents unbounded `_batch_collected` list growth.
+- **WS batch lines cap**: `_MAX_BATCH_LINES = 1000` limits lines processed per message to prevent unbounded memory growth.
 - **WS close() unblocks waiters**: `close()` sets `_flush_done` to prevent `wait_for_completion()` from hanging indefinitely.
 - **WS engine snapshot pattern**: `_on_audio_chunk` snapshots `ws_engine = self._ws_engine` before use to prevent race with `_on_deactivate` nulling the reference.
 - **Batch audio buffer cap**: `_max_batch_chunks` (derived from `max_speech_s / 0.032`) prevents unbounded memory growth from held hotkeys. Chunks beyond the cap are silently dropped.
