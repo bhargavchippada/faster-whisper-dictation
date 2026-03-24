@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -71,17 +72,17 @@ class TestAudioToInt16Bytes:
         audio = np.array([0.5, -0.5, 1.0, -1.0], dtype=np.float32)
         result = _audio_to_int16_bytes(audio)
         arr = np.frombuffer(result, dtype=np.int16)
-        assert arr[0] == 16383  # 0.5 * 32767 ≈ 16383
-        assert arr[1] == -16383
+        assert arr[0] == 16384  # 0.5 * 32768 = 16384
+        assert arr[1] == -16384
         assert arr[2] == 32767  # clipped
-        assert arr[3] == -32767
+        assert arr[3] == -32768  # -1.0 * 32768 = -32768
 
     def test_float64_input(self):
         audio = np.array([0.0, 0.5], dtype=np.float64)
         result = _audio_to_int16_bytes(audio)
         arr = np.frombuffer(result, dtype=np.int16)
         assert arr[0] == 0
-        assert arr[1] == 16383
+        assert arr[1] == 16384  # 0.5 * 32768 = 16384
 
     def test_int16_passthrough(self):
         audio = np.array([100, -200, 32767], dtype=np.int16)
@@ -122,15 +123,15 @@ class TestWhisperLiveKitEngineInit:
             )
 
     def test_zero_reconnect_delay_raises(self):
-        with pytest.raises(ValueError, match="reconnect_delay must be > 0"):
+        with pytest.raises(ValueError, match="reconnect_delay must be >= 0.1"):
             WhisperLiveKitEngine(
-                server_url="http://localhost:8000",                language="en", reconnect_delay=0.0,
+                server_url="http://localhost:8000", language="en", reconnect_delay=0.0,
             )
 
     def test_negative_reconnect_delay_raises(self):
-        with pytest.raises(ValueError, match="reconnect_delay must be > 0"):
+        with pytest.raises(ValueError, match="reconnect_delay must be >= 0.1"):
             WhisperLiveKitEngine(
-                server_url="http://localhost:8000",                language="en", reconnect_delay=-1.0,
+                server_url="http://localhost:8000", language="en", reconnect_delay=-1.0,
             )
 
     def test_ws_url_property(self):
@@ -169,7 +170,7 @@ class TestConnect:
         mock_ws_mod.connect.side_effect = [ConnectionRefusedError, MagicMock()]
         engine = WhisperLiveKitEngine(
             server_url="http://localhost:8000", language="en",
-            reconnect_attempts=1, reconnect_delay=0.01,
+            reconnect_attempts=1, reconnect_delay=0.1,
         )
         engine.connect()
         assert engine._connected.is_set()
@@ -181,7 +182,7 @@ class TestConnect:
         mock_ws_mod.connect.side_effect = ConnectionRefusedError("refused")
         engine = WhisperLiveKitEngine(
             server_url="http://localhost:8000", language="en",
-            reconnect_attempts=1, reconnect_delay=0.01,
+            reconnect_attempts=1, reconnect_delay=0.1,
         )
         with pytest.raises(ConnectionRefusedError):
             engine.connect()
@@ -598,10 +599,124 @@ class TestProcessResponse:
     def test_skips_non_dict_lines(self):
         cb = MagicMock()
         engine = WhisperLiveKitEngine(
-            server_url="http://localhost:8000",            language="en", on_text=cb,
+            server_url="http://localhost:8000", language="en", on_text=cb,
         )
         engine._process_response(lines=["not a dict", 42], buffer_text="")
         cb.assert_not_called()
+
+    def test_streaming_emits_at_word_boundaries(self):
+        """Emit only complete words to prevent mid-word splits."""
+        cb = MagicMock()
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en", on_text=cb,
+        )
+        # Single word — no emission yet (could be partial like "Punctu")
+        engine._process_response(lines=[{"text": "hello"}], buffer_text="")
+        cb.assert_not_called()
+
+        # Second word arrives — first word is now confirmed complete
+        engine._process_response(lines=[{"text": "hello world"}], buffer_text="")
+        cb.assert_called_once_with("hello")
+        cb.reset_mock()
+
+        # Third word — second word emits
+        engine._process_response(lines=[{"text": "hello world foo"}], buffer_text="")
+        cb.assert_called_once_with("world")
+
+        # Trailing word available via get_pending_text (deactivation fallback)
+        pending = engine.get_pending_text()
+        assert "foo" in pending
+
+    def test_oversized_text_capped(self):
+        """Full text exceeding _MAX_MESSAGE_BYTES is truncated."""
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        big_text = "x" * (2 * 1024 * 1024)  # 2MB
+        engine._process_response(lines=[{"text": big_text}], buffer_text="")
+        assert len(engine._latest_full_text) <= 1 * 1024 * 1024
+
+    def test_streaming_resets_emitted_len_on_new_utterance(self):
+        """When text shrinks (new utterance), _emitted_len resets."""
+        cb = MagicMock()
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en", on_text=cb,
+        )
+        # First utterance — "hello" emits when "world" arrives
+        engine._process_response(lines=[{"text": "hello world"}], buffer_text="")
+        cb.assert_called_once_with("hello")
+        cb.reset_mock()
+        assert engine._emitted_len == 6  # cursor past space: "hello " (index 6)
+
+        # Server sends longer text
+        engine._process_response(lines=[{"text": "hello world done"}], buffer_text="")
+        cb.assert_called_once_with("world")
+        cb.reset_mock()
+
+        # New shorter utterance (server rolled over) — resets emitted_len
+        engine._process_response(lines=[{"text": "hi there"}], buffer_text="")
+        cb.assert_called_once_with("hi")
+        assert engine._emitted_len == 3  # cursor past space: "hi " (index 3)
+
+    def test_streaming_suppresses_in_place_revision(self):
+        """If stable text changes in-place (not prefix extension), suppress emit."""
+        cb = MagicMock()
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en", on_text=cb,
+        )
+        # Emit "hello" (word boundary), hold "there"
+        engine._process_response(lines=[{"text": "hello there"}], buffer_text="")
+        cb.assert_called_once_with("hello")
+        cb.reset_mock()
+
+        # Server revises beginning of text — no longer a prefix of previous
+        engine._process_response(lines=[{"text": "hallo there now"}], buffer_text="")
+        cb.assert_not_called()
+        assert engine._streamed_stable_text == "hallo there now"
+        assert engine._emitted_len == len("hallo there now")
+
+    def test_streaming_no_emit_without_callback(self):
+        """Without on_text, no streaming emission occurs."""
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        engine._process_response(lines=[{"text": "hello"}], buffer_text="")
+        assert engine._latest_full_text == "hello"
+        # No callback, _has_on_text is False — _emitted_len stays 0
+        assert engine._emitted_len == 0
+
+    def test_streaming_does_not_emit_buffer_text(self):
+        """Buffer text is partial/unstable — not emitted in streaming mode.
+
+        Only stable text from lines[] is emitted via on_text. Buffer text
+        is available via get_pending_text() for deactivation fallback.
+        """
+        cb = MagicMock()
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en", on_text=cb,
+        )
+        # Lines have "hello world", buffer has partial "wor"
+        engine._process_response(lines=[{"text": "hello world"}], buffer_text="wor")
+        cb.assert_called_once_with("hello")
+        # full text includes buffer, but emitted_len tracks only stable text
+        assert engine._latest_full_text == "hello world wor"
+        assert engine._emitted_len == 6  # cursor past space: "hello " (index 6)
+        cb.reset_mock()
+
+        # Server finalises into lines, buffer clears
+        engine._process_response(lines=[{"text": "hello world works"}], buffer_text="")
+        cb.assert_called_once_with("world")
+
+    def test_buffer_available_via_get_pending_text(self):
+        """Buffer text not emitted via on_text is available via get_pending_text."""
+        cb = MagicMock()
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en", on_text=cb,
+        )
+        engine._process_response(lines=[{"text": "hello"}], buffer_text="partial")
+        cb.assert_not_called()  # single word, no word boundary yet
+        # get_pending_text returns all unemitted text (hello + partial)
+        assert engine.get_pending_text() == "hello partial"
 
 
 # ---------------------------------------------------------------------------
@@ -622,6 +737,122 @@ class TestGetPendingText:
             server_url="http://localhost:8000", language="en",
         )
         assert engine.get_pending_text() == ""
+
+
+# ---------------------------------------------------------------------------
+# Time-based word flush
+# ---------------------------------------------------------------------------
+
+
+class TestMaybeFlushPendingWord:
+    def test_flushes_trailing_word_after_timeout(self):
+        """Trailing word emitted after _WORD_FLUSH_TIMEOUT_S of inactivity."""
+        cb = MagicMock()
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en", on_text=cb,
+        )
+        # Simulate: "hello world" arrives, "hello" emitted, "world" held
+        engine._process_response(lines=[{"text": "hello world"}], buffer_text="")
+        cb.assert_called_once_with("hello")
+        cb.reset_mock()
+
+        # Simulate time passing beyond flush timeout
+        with engine._seg_lock:
+            engine._last_stable_change = time.monotonic() - 2.0
+
+        engine._maybe_flush_pending_word()
+        cb.assert_called_once_with("world")
+
+    def test_no_flush_before_timeout(self):
+        """No flush when text changed recently."""
+        cb = MagicMock()
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en", on_text=cb,
+        )
+        engine._process_response(lines=[{"text": "hello world"}], buffer_text="")
+        cb.reset_mock()
+
+        # last_stable_change is recent — should NOT flush
+        engine._maybe_flush_pending_word()
+        cb.assert_not_called()
+
+    def test_no_double_flush(self):
+        """Once flushed, does not emit again until new text arrives."""
+        cb = MagicMock()
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en", on_text=cb,
+        )
+        engine._process_response(lines=[{"text": "hello world"}], buffer_text="")
+        cb.reset_mock()
+
+        with engine._seg_lock:
+            engine._last_stable_change = time.monotonic() - 2.0
+
+        engine._maybe_flush_pending_word()
+        cb.assert_called_once_with("world")
+        cb.reset_mock()
+
+        # Second call — already flushed
+        engine._maybe_flush_pending_word()
+        cb.assert_not_called()
+
+    def test_flush_resets_on_new_text(self):
+        """New text arriving resets the flush flag, allowing future flushes."""
+        cb = MagicMock()
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en", on_text=cb,
+        )
+        engine._process_response(lines=[{"text": "hello world"}], buffer_text="")
+        cb.reset_mock()
+
+        # Flush the trailing "world"
+        with engine._seg_lock:
+            engine._last_stable_change = time.monotonic() - 2.0
+        engine._maybe_flush_pending_word()
+        cb.assert_called_once_with("world")
+        cb.reset_mock()
+
+        # New text arrives — should reset and allow new flush later
+        engine._process_response(lines=[{"text": "hello world foo"}], buffer_text="")
+        assert engine._pending_word_flushed is False
+
+    def test_noop_without_callback(self):
+        """No-op when engine has no on_text callback (batch mode)."""
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        engine._latest_full_text = "pending"
+        engine._last_stable_change = time.monotonic() - 2.0
+        engine._maybe_flush_pending_word()  # should not raise
+        assert engine._pending_word_flushed is False
+
+    def test_noop_when_no_text_received(self):
+        """No-op when no text has ever been received."""
+        cb = MagicMock()
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en", on_text=cb,
+        )
+        engine._maybe_flush_pending_word()  # _last_stable_change == 0.0
+        cb.assert_not_called()
+
+    def test_noop_when_nothing_pending(self):
+        """No-op when all text has been emitted."""
+        cb = MagicMock()
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en", on_text=cb,
+        )
+        engine._process_response(
+            lines=[{"text": "hello world foo"}], buffer_text="",
+        )
+        cb.reset_mock()  # "hello world" emitted, "foo" pending
+
+        # Manually advance cursor to end (simulate all text emitted)
+        with engine._seg_lock:
+            engine._emitted_len = len(engine._latest_full_text)
+            engine._last_stable_change = time.monotonic() - 2.0
+
+        engine._maybe_flush_pending_word()
+        cb.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

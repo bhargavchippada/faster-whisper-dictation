@@ -119,7 +119,7 @@ def _load_onnx_model() -> None:
                 _verify_model_hash(tmp, _ONNX_MODEL_SHA256)
             else:
                 log.debug("SHA-256 verification skipped (DICTATION_VAD_VERIFY_HASH=true to enable)")
-            tmp.rename(cache)
+            tmp.replace(cache)  # atomic on POSIX, works cross-filesystem
         except Exception:
             tmp.unlink(missing_ok=True)
             raise
@@ -325,6 +325,7 @@ class SpeechDetector:
             audio = np.concatenate(self._speech_frames)
             has_enough = self._speech_count >= self.min_speech_chunks
             self._speech_frames.clear()
+            self._ring_buffer.clear()
             self._is_speaking = False
             self._silence_count = 0
             self._speech_count = 0

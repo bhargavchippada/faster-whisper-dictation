@@ -23,20 +23,23 @@ src/whisper_dictation/
 │   └── whisperlivekit.py # WhisperLiveKit WebSocket engine (streaming + batch)
 └── hotkey/
     ├── __init__.py     # Public HotkeyListener export
-    └── listener.py     # pynput (macOS/Windows/X11) + evdev (Wayland)
+    └── listener.py     # evdev (Linux preferred) + pynput (macOS/Windows/X11 fallback)
 ```
 
 ## Key Design Decisions
 
 - **Immutable config**: All config dataclasses are `frozen=True`. Build new instances, never mutate.
-- **Engine factory**: `create_engine()` in `engine/__init__.py` centralizes engine instantiation. `TranscriptionEngine` ABC allows swapping server/local backends transparently.
+- **Engine factory**: `create_engine()` in `engine/__init__.py` centralizes REST/local engine instantiation. `create_ws_engine()` creates `WhisperLiveKitEngine` for WebSocket streaming/batch. `TranscriptionEngine` ABC allows swapping server/local backends transparently.
 - **Silero VAD over RMS energy**: Silero is ML-based, far more accurate for speech detection.
 - **ONNX by default**: VAD uses ONNX Runtime, not PyTorch, to keep the dependency footprint small.
-- **pynput + evdev**: pynput handles macOS/Windows/X11; evdev handles Linux Wayland where pynput fails. Callbacks fire outside the hotkey lock to prevent deadlocks.
+- **pynput + evdev**: evdev is preferred on all Linux (properly blocks via select, distinguishes real key-up from auto-repeat). pynput is fallback for macOS/Windows/X11 without input-device permissions. Callbacks fire outside the hotkey lock to prevent deadlocks.
+- **Hold mode debounce (pynput)**: X11 auto-repeat generates synthetic release+press pairs that break hold-to-talk. A single watcher thread uses monotonic timestamps — each release sets a stamp, each re-press clears it. The watcher sleeps for `_HOLD_DEBOUNCE_S` (250ms default, env `DICTATION_HOLD_DEBOUNCE_MS`), then checks if the stamp survived. At most one watcher thread runs at a time. evdev doesn't need this (value=2 events are auto-repeat, value=0 is real release).
+- **Toggle mode key-release guard**: `_key_released` flag prevents X11 auto-repeat from toggling off. A toggle-off press is only accepted after a physical key release event. This prevents the pattern: Toggle ON → auto-repeat leaks past time debounce → Toggle OFF (0.2s).
 - **Non-blocking notifications**: `subprocess.Popen` (not `.run`) for Linux/macOS so notifications never block the daemon.
 - **Persistent HTTP session in server mode**: `ServerEngine` reuses a `requests.Session` to reduce per-request overhead when talking to the local STT server.
 - **WhisperLiveKit WebSocket engine**: `WhisperLiveKitEngine` handles both streaming (real-time callbacks) and batch (synchronous) transcription via WhisperLiveKit's protocol (no client handshake, int16 PCM audio, `ready_to_stop` completion signal). Does NOT extend `TranscriptionEngine` ABC (async push model vs sync request/response).
-- **Thread safety in WS engine**: `_seg_lock` protects `_latest_full_text` shared between caller and receiver threads. `_END_SENTINEL = object()` uses identity check (`is`) not equality. Sender/receiver thread death sets `_stop_event` and `_flush_done` to unblock callers.
+- **Thread safety in WS engine**: `_seg_lock` protects `_latest_full_text`, `_streamed_stable_text`, and `_eoa_sent` shared between caller and receiver threads. `_END_SENTINEL = object()` uses identity check (`is`) not equality. Sender/receiver thread death sets `_stop_event` and `_flush_done` to unblock callers.
+- **Word-boundary streaming emission**: `_process_response` emits only complete words (up to the last space via `rfind(" ")`). Buffer text (`buffer_transcription`) is excluded from streaming emission (unstable/partial). `startswith()` detects append-only growth vs in-place revision. Revision suppresses emission and resyncs the cursor. Trailing partial word emitted on deactivation via `get_pending_text()`.
 - **Batch over streaming**: Batch mode sends complete utterances for transcription (highest accuracy). Streaming mode (`--streaming`) is experimental — sends partial audio chunks for real-time output but with lower quality. In server mode, both paths use WebSocket (WhisperLiveKit).
 - **Background daemon**: `start -b` uses Unix double-fork (`_daemonize()`) to detach from terminal. Follows Stevens APUE: setsid, chdir("/"), closerange, O_APPEND log, O_CLOEXEC. Logs to `~/.config/faster-whisper-dictation/daemon.log`.
 
@@ -45,12 +48,28 @@ src/whisper_dictation/
 WhisperLiveKit is pip-installable and serves as the WebSocket backend (default URL: `http://localhost:8000`):
 
 ```bash
-pip install whisperlivekit
+uv tool install whisperlivekit
 
-# CUDA 12 required — if libcublas.so.12 is not in default path:
+# Batch mode (default) — standard config:
 LD_LIBRARY_PATH=/usr/local/lib/ollama/cuda_v12:$LD_LIBRARY_PATH \
   wlk serve --model large-v3 --language en --pcm-input
+
+# Streaming mode — optimized for dictation quality:
+LD_LIBRARY_PATH=/usr/local/lib/ollama/cuda_v12:$LD_LIBRARY_PATH \
+  wlk serve --model large-v3 --language en --pcm-input \
+  --min-chunk-size 1.5 --confidence-validation
 ```
+
+### Streaming server flags
+
+| Flag | Default | Recommended | Effect |
+|------|---------|-------------|--------|
+| `--min-chunk-size` | 0.1s | **1.5s** | Audio accumulated before processing. 0.1s = garbled slow speech; 1.5s = enough context |
+| `--confidence-validation` | off | **on** | Commits high-confidence tokens immediately, reduces text flip-flopping |
+| `--buffer_trimming` | segment | sentence | Sentence-based trimming for cleaner output (optional) |
+| `--buffer_trimming_sec` | 15 | 25 | Longer audio context window (optional, uses more VRAM) |
+
+**Do NOT use `--no-vac`**: VAC (server-side Voice Activity Controller) prevents silence from reaching Whisper. Without it, silence triggers hallucination loops ("Thank you" repeated endlessly). Keep VAC enabled (the default). The client-side Silero VAD is a separate layer that detects speech boundaries for segmentation — it does not replace server-side VAC.
 
 **Note:** WhisperLiveKit requires CUDA 12 (`libcublas.so.12`). If your system has CUDA 13, set `LD_LIBRARY_PATH` to a directory containing CUDA 12 libs (e.g. from Ollama). Without this, the model silently produces empty transcriptions.
 
@@ -78,6 +97,7 @@ LD_LIBRARY_PATH=/usr/local/lib/ollama/cuda_v12:$LD_LIBRARY_PATH \
 - **VAD model download size limit**: `_MAX_MODEL_BYTES = 50MB` enforced via streaming download. Prevents memory exhaustion from malicious `DICTATION_VAD_MODEL_URL` responses.
 - **VAD cache directory permissions**: Created with `mode=0o700` to prevent other users from replacing the cached model.
 - **Evdev device removal handling**: `OSError` during `dev.read()` removes the device from the poll list and closes it, preventing CPU-saturating busy-loops when USB keyboards are unplugged.
+- **Streaming repetition filter**: `_on_ws_text` suppresses hallucination loops (e.g. Whisper repeating "Thank you" during silence). Normalized comparison (lowercase, trailing punctuation stripped) allows 2 identical emissions, suppresses from 3rd. Resets on different text or new recording session.
 
 ## Daemon Management
 
@@ -100,7 +120,7 @@ Always try `faster-whisper-dictation stop` before resorting to `pkill`. Backgrou
 
 ```bash
 # Install in dev mode
-uv sync --dev
+uv sync --extra dev
 
 # Run tests
 uv run pytest -v
@@ -116,6 +136,9 @@ uv run ruff check src/ tests/
 
 # Build clean artifacts without cache
 uv build --clear --no-cache
+
+# Install globally (editable — picks up code changes automatically)
+uv tool install -e . --force
 ```
 
 ## Testing
@@ -125,7 +148,7 @@ uv build --clear --no-cache
 - Use `unittest.mock.patch` for all external subprocess calls and hardware interfaces.
 - Target: 100% test coverage. All new code must include tests.
 - Tests must never hang — mock `wait_for_completion()` in batch tests with `patch.object(engine, 'wait_for_completion', return_value=True)`. See `tests/test_engine_whisperlivekit.py` for established patterns.
-- Current status: 482 tests, 99% line coverage (2 trivial defensive lines), runs in ~2s.
+- Current status: 519 tests, 100% line coverage, runs in ~5s.
 
 ## CI
 
@@ -133,7 +156,7 @@ GitHub Actions runs on every push/PR to main:
 - Python 3.10, 3.11, 3.12, 3.13, 3.14 matrix
 - Lint with ruff
 - Tests with coverage gate (minimum 80%)
-- 482 tests, 99% coverage
+- 519 tests, 100% coverage
 
 ## Performance Notes
 
@@ -152,7 +175,7 @@ GitHub Actions runs on every push/PR to main:
 
 | Feature | Linux X11 | Linux Wayland | macOS | Windows |
 |---------|-----------|---------------|-------|---------|
-| Hotkey | pynput | evdev | pynput | pynput |
+| Hotkey | evdev (preferred) / pynput | evdev | pynput | pynput |
 | Typing | xdotool+xclip | ydotool+wl-clipboard | pbcopy+osascript | ctypes (Win32 API) |
 | Notify | notify-send | notify-send | osascript | plyer |
 | Audio | sounddevice | sounddevice | sounddevice | sounddevice |

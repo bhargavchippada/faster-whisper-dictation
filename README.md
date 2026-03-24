@@ -46,24 +46,18 @@ Recent live benchmarks on the current build showed the daemon averaging `0.00%` 
 - **Local engine fallback** -- optional built-in faster-whisper engine, no server needed
 - **Fully offline** -- all processing happens on your machine
 - **Privacy-first** -- no cloud, no accounts, no telemetry
-- **Streaming mode** *(experimental)* -- `--streaming` sends partial audio for real-time text, but quality is lower than batch mode
+- **Streaming mode** *(experimental)* -- `--streaming` sends partial audio for real-time text; quality depends on server tuning (see [Streaming mode](#streaming-mode) below)
 
 ## Install
 
-Requires Python 3.10+.
+Requires Python 3.10+ and [uv](https://docs.astral.sh/uv/) (recommended) or pip.
 
 ```bash
-# Install with uv (recommended)
+# Install with uv (recommended — isolated env, globally available)
 uv tool install faster-whisper-dictation
-
-# Or with pipx
-pipx install faster-whisper-dictation
 
 # Or with pip
 pip install faster-whisper-dictation
-
-# Build release artifacts from a checkout
-uv build --clear --no-cache
 ```
 
 ### Optional: local engine (no server needed)
@@ -82,7 +76,10 @@ uv tool install "faster-whisper-dictation[local-gpu]"
 <summary><b>Linux (X11)</b></summary>
 
 ```bash
-sudo apt install -y xdotool xclip libportaudio2 libnotify-bin
+sudo apt install -y xdotool xclip libportaudio2 libnotify-bin python3-evdev
+
+# Recommended: enable evdev for reliable hold-to-talk mode
+sudo usermod -aG input $USER   # then re-login
 ```
 </details>
 
@@ -109,15 +106,18 @@ No additional system dependencies needed.
 WhisperLiveKit is a pip-installable Whisper server. No Docker required.
 
 ```bash
-# 1. Install WhisperLiveKit (requires Python 3.11+)
-pip install whisperlivekit          # CPU
-pip install whisperlivekit[gpu]     # GPU (requires CUDA)
+# 1. Install WhisperLiveKit
+uv tool install whisperlivekit       # includes GPU support via faster-whisper
 
-# 2. Start the server
-wlk --model large-v3 --language en
+# 2. Start the server (Terminal 1)
+wlk serve --model large-v3 --language en --pcm-input
 
-# 3. Install and start dictation (in another terminal)
-pip install faster-whisper-dictation
+# If your system has CUDA 13+ but needs CUDA 12 libs (e.g. from Ollama):
+LD_LIBRARY_PATH=/usr/local/lib/ollama/cuda_v12:$LD_LIBRARY_PATH \
+  wlk serve --model large-v3 --language en --pcm-input
+
+# 3. Install and start dictation (Terminal 2)
+uv tool install faster-whisper-dictation
 faster-whisper-dictation start
 
 # 4. Press Alt+V to start/stop dictation
@@ -161,8 +161,9 @@ faster-whisper-dictation start --server-url http://my-server:8000
 # Use local engine instead of server
 faster-whisper-dictation start --engine local
 
-# Experimental: real-time streaming (lower accuracy, WIP)
+# Real-time streaming (requires server tuning, see Streaming mode section)
 faster-whisper-dictation start --streaming
+faster-whisper-dictation start --streaming --mode hold
 
 # Run as a background daemon (Unix only, no need for &)
 faster-whisper-dictation start -b
@@ -202,16 +203,16 @@ url = "http://localhost:8000"
 model = "Systran/faster-whisper-large-v3"
 language = "en"
 timeout = 10            # request timeout in seconds
-# prompt = ""           # bias transcription (e.g. domain vocabulary)
+# prompt = ""           # domain vocabulary or style example (not instructions)
 # temperature = 0.0     # 0.0 = accurate, higher = creative
 # hotwords = ""         # comma-separated words to boost recognition
 
 [hotkey]
-binding = "alt+v"       # any key combo supported by your platform
+binding = "alt+v"       # modifiers + single letter, e.g. "alt+v" or "ctrl+shift+d"
 mode = "toggle"         # "toggle" or "hold"
 
 [vad]
-threshold = 0.5         # Silero VAD confidence threshold (0.0-1.0)
+threshold = 0.6         # Silero VAD confidence threshold (0.0-1.0)
 silence_ms = 200        # silence duration to end an utterance
 min_speech_ms = 250     # minimum speech duration to accept
 max_speech_s = 90.0     # max single utterance duration (seconds)
@@ -223,7 +224,7 @@ device = null           # null = system default, or device name/index
 
 [engine]
 type = "server"         # "server" or "local"
-compute_type = "float16" # "float16" (GPU), "int8" (CPU), "auto"
+compute_type = "auto"    # "auto", "float16" (GPU), "int8" (CPU)
 device = "auto"          # "auto", "cuda", "cpu"
 
 [websocket]
@@ -239,7 +240,7 @@ reconnect_delay = 1.0   # seconds between retries
 | `WHISPER_MODEL` | `Systran/faster-whisper-large-v3` | Model name |
 | `WHISPER_LANG` | `en` | Language code |
 | `WHISPER_TIMEOUT` | `10` | Request timeout (seconds) |
-| `WHISPER_PROMPT` | (empty) | Bias transcription (e.g. domain vocabulary) |
+| `WHISPER_PROMPT` | (empty) | Domain vocabulary or style example for Whisper |
 | `WHISPER_TEMPERATURE` | `0.0` | Transcription temperature (0.0 = accurate) |
 | `WHISPER_HOTWORDS` | (empty) | Comma-separated words to boost recognition |
 | `DICTATION_HOTKEY` | `alt+v` | Hotkey binding |
@@ -249,7 +250,7 @@ reconnect_delay = 1.0   # seconds between retries
 | `DICTATION_ENGINE_DEVICE` | `auto` | Device: `cuda`, `cpu`, `auto` |
 | `DICTATION_AUDIO_DEVICE` | (system default) | Audio input device name |
 | `DICTATION_SAMPLE_RATE` | `16000` | Audio sample rate (Hz) |
-| `DICTATION_VAD_THRESHOLD` | `0.5` | VAD confidence threshold (0.0-1.0) |
+| `DICTATION_VAD_THRESHOLD` | `0.6` | VAD confidence threshold (0.0-1.0) |
 | `DICTATION_VAD_SILENCE_MS` | `200` | Silence duration to end utterance (ms) |
 | `DICTATION_VAD_MIN_SPEECH_MS` | `250` | Minimum speech duration to accept (ms) |
 | `DICTATION_VAD_MAX_SPEECH_S` | `90.0` | Maximum single utterance duration (s) |
@@ -279,7 +280,7 @@ faster-whisper-dictation/
 │   ├── vad.py              # Silero VAD (ONNX, SHA-256 verified)
 │   ├── typer.py            # Platform-aware text input (clipboard + paste)
 │   └── notifier.py         # Cross-platform desktop notifications
-├── tests/                  # 480 tests, 99% coverage
+├── tests/                  # 519 tests, 100% coverage
 ├── .github/workflows/      # CI: lint + test on Python 3.10-3.14
 └── pyproject.toml          # Package config (uv/pip installable)
 ```
@@ -288,8 +289,8 @@ faster-whisper-dictation/
 
 | Mode | Backend | Setup | Best for |
 |------|---------|-------|----------|
-| **Server** (default) | [WhisperLiveKit](https://github.com/QuentinFuxa/WhisperLiveKit) via WebSocket | `pip install whisperlivekit && wlk --model large-v3` | GPU users, streaming + batch, shared servers |
-| **Local** | Built-in faster-whisper | `pip install "faster-whisper-dictation[local]"` | Simple setup, single-user, offline |
+| **Server** (default) | [WhisperLiveKit](https://github.com/QuentinFuxa/WhisperLiveKit) via WebSocket | `uv tool install whisperlivekit && wlk serve --model large-v3 --pcm-input` | GPU users, streaming + batch, shared servers |
+| **Local** | Built-in faster-whisper | `uv tool install "faster-whisper-dictation[local]"` | Simple setup, single-user, offline |
 
 Server mode uses WebSocket for both batch and streaming transcription (shared GPU model, lower latency). REST API is available as a fallback.
 
@@ -297,7 +298,7 @@ Server mode uses WebSocket for both batch and streaming transcription (shared GP
 
 | Feature | Linux X11 | Linux Wayland | macOS | Windows |
 |---------|-----------|---------------|-------|---------|
-| Hotkey | pynput | evdev | pynput | pynput |
+| Hotkey | evdev (preferred) / pynput | evdev | pynput | pynput |
 | Text input | xdotool + xclip | ydotool + wl-clipboard | pbcopy + osascript | ctypes |
 | Notifications | notify-send | notify-send | osascript | plyer |
 | Audio capture | sounddevice | sounddevice | sounddevice | sounddevice |
@@ -309,27 +310,29 @@ Server mode uses WebSocket for both batch and streaming transcription (shared GP
 ### Installation
 
 ```bash
-# CPU mode
+# Recommended: install as a uv tool (isolated env, globally available)
+uv tool install whisperlivekit
+
+# Or with pip
 pip install whisperlivekit
-
-# GPU mode (requires CUDA)
-pip install whisperlivekit[gpu]
 ```
-
-**Note:** WhisperLiveKit requires Python 3.11+. The dictation client itself works with Python 3.10+, so you may need separate environments if running both on the same machine.
 
 ### Running the server
 
 ```bash
-# Basic usage
-wlk --model large-v3 --language en --pcm-input
+# Batch mode (default — highest accuracy)
+wlk serve --model large-v3 --language en --pcm-input
+
+# Streaming mode (real-time text, see Streaming mode section)
+wlk serve --model large-v3 --language en --pcm-input \
+  --min-chunk-size 1.5 --confidence-validation
 
 # If CUDA 12 libs are not in default path (e.g. system has CUDA 13):
 LD_LIBRARY_PATH=/usr/local/lib/ollama/cuda_v12:$LD_LIBRARY_PATH \
   wlk serve --model large-v3 --language en --pcm-input
 
 # Specify host and port
-wlk --model large-v3 --language en --pcm-input --host 0.0.0.0 --port 8000
+wlk serve --model large-v3 --language en --pcm-input --host 0.0.0.0 --port 8000
 ```
 
 > **CUDA 12 required:** WhisperLiveKit's faster-whisper backend needs `libcublas.so.12`. If your system has CUDA 13+, set `LD_LIBRARY_PATH` to include CUDA 12 libraries. Without this, the model loads but silently produces empty transcriptions.
@@ -373,20 +376,91 @@ faster-whisper-dictation start --server-url https://api.groq.com/openai
 - **PID file locking** -- exclusive `fcntl.flock` prevents duplicate daemon instances (falls back to simple PID on Windows).
 - **Model integrity** -- ONNX VAD model downloads use a 60s timeout. SHA-256 verification is opt-in (`DICTATION_VAD_VERIFY_HASH=true`). Partial downloads are atomically cleaned up. Custom model URLs validated to use http/https.
 - **Config validation** -- all values validated with clear error messages. Server URLs checked for http/https scheme. Invalid env vars rejected at startup.
-- **Localhost by default** -- the dictation client connects to `localhost` by default. To restrict server network exposure, run `wlk --host 127.0.0.1`.
+- **Localhost by default** -- the dictation client connects to `localhost` by default. To restrict server network exposure, run `wlk serve --host 127.0.0.1`.
 - **No telemetry** -- zero data collection, no phone-home, no analytics.
-- **WebSocket safety** -- message size capped at 1MB, batch segment count capped at 1000 to prevent memory exhaustion. Non-loopback unencrypted WebSocket connections trigger a warning.
+- **WebSocket safety** -- message size capped at 1MB, lines per server message capped at 1000 to prevent memory exhaustion. Non-loopback unencrypted WebSocket connections trigger a warning.
+
+## Transcription quality
+
+The default settings are tuned for accurate dictation out of the box. Whisper `large-v3` handles punctuation and capitalization well without any prompt.
+
+- **`server.prompt`** — Empty by default. Whisper treats this as **text to emulate** (not instructions). Use it for domain vocabulary, e.g. `"We deployed the Kubernetes cluster and updated the Docker containers."` — this helps the model recognize specific terms. Do **not** write instructions like "Use proper punctuation" — Whisper will misinterpret them and produce worse output.
+- **`server.temperature`** — Defaults to `0.0` (most deterministic). Higher values (0.2-0.5) produce more varied output but less accurate transcription.
+- **`server.hotwords`** — Comma-separated list of words to boost recognition. Useful for proper nouns, technical terms, or words Whisper frequently gets wrong (e.g. `"FastAPI,PyTorch,Kubernetes"`).
+- **`vad.threshold`** — Defaults to `0.6`. Controls how aggressively Silero VAD detects speech. Higher values (0.7-0.8) reduce false triggers from background noise but may clip quiet speech. Lower values (0.3-0.5) are more sensitive.
+- **`vad.silence_ms`** — Defaults to `200`. How long to wait after speech stops before considering the utterance complete. Increase to `500-800` if your speech has natural pauses that get cut off.
+
+## Streaming mode
+
+Streaming mode (`--streaming`) sends audio to the server in real-time and types text as it arrives, instead of waiting for the full utterance. This trades some accuracy for lower latency.
+
+### Server setup for streaming
+
+The default WhisperLiveKit config processes audio every 100ms, which produces garbled output for slow or paused speech. For dictation, increase the processing window:
+
+```bash
+# Optimized for streaming dictation:
+wlk serve --model large-v3 --language en --pcm-input \
+  --min-chunk-size 1.5 \
+  --confidence-validation
+
+# If CUDA 12 libs are not in default path (e.g. system has CUDA 13):
+LD_LIBRARY_PATH=/usr/local/lib/ollama/cuda_v12:$LD_LIBRARY_PATH \
+  wlk serve --model large-v3 --language en --pcm-input \
+  --min-chunk-size 1.5 --confidence-validation
+
+# Start the client in streaming mode (in another terminal):
+faster-whisper-dictation start --streaming
+
+# Or with hold-to-talk:
+faster-whisper-dictation start --streaming --mode hold
+```
+
+### Server tuning flags
+
+| Flag | Default | Recommended | Why |
+|------|---------|-------------|-----|
+| `--min-chunk-size` | 0.1s | **1.5** | Accumulates 1.5s of audio before running inference. Gives Whisper enough context for accurate decoding, especially with slow speech. |
+| `--confidence-validation` | off | **on** | Commits high-confidence tokens immediately without waiting for LocalAgreement confirmation. Reduces text flip-flopping. |
+| `--buffer_trimming` | segment | sentence | *(optional)* Sentence-based buffer trimming for cleaner output. |
+| `--buffer_trimming_sec` | 15 | 25-30 | *(optional)* Keeps more audio context. Tradeoff: higher VRAM usage. |
+
+> **Do NOT use `--no-vac`**: VAC (server-side Voice Activity Controller) prevents silence from reaching Whisper. Disabling it causes hallucination loops where Whisper repeats phrases like "Thank you" during silence. Keep VAC enabled (the default). This is a [known open issue](https://github.com/QuentinFuxa/WhisperLiveKit/issues/338) in WhisperLiveKit.
+
+### Streaming quality notes
+
+| Speaking style | Quality | Notes |
+|---------------|---------|-------|
+| Fast, continuous | Good | Enough audio context per processing window |
+| Normal pace | Good with tuning | `--min-chunk-size 1.5` is key |
+| Slow with pauses | Acceptable | Some words may be delayed; batch mode is better for this |
+
+**Recommendation:** Use batch mode (default, no `--streaming`) for highest accuracy. Streaming is best for fast, continuous dictation where real-time feedback matters.
+
+### Linux: hold mode requires evdev
+
+On Linux, hold-to-talk in streaming mode works best with **evdev** (not pynput). evdev natively distinguishes real key releases from X11 auto-repeat, so hold mode works indefinitely.
+
+```bash
+# Add your user to the input group for evdev access:
+sudo usermod -aG input $USER
+# Then log out and log back in
+```
+
+Without evdev, pynput is used as a fallback. Hold mode with pynput has a 250ms debounce to handle X11 auto-repeat, but may still release prematurely on some systems. Toggle mode works with both backends.
 
 ## Troubleshooting
 
 | Problem | Solution |
 |---------|----------|
-| Hotkey not responding | Check `faster-whisper-dictation status`. On Wayland, ensure your user is in the `input` group. |
-| "Server not reachable" | Start the WhisperLiveKit server: `wlk --model large-v3 --language en`. Or use `--engine local`. |
+| Hotkey not responding | Check `faster-whisper-dictation status`. On Linux, ensure your user is in the `input` group (`sudo usermod -aG input $USER` then re-login) for evdev support. |
+| Hold mode releases early | On Linux, install evdev access (see above). Without it, pynput's X11 backend has auto-repeat issues. Tune with `DICTATION_HOLD_DEBOUNCE_MS=300`. |
+| Streaming garbled/slow speech | Increase server `--min-chunk-size` (default 0.1s, try 1.5). See [Streaming mode](#streaming-mode). |
+| "Server not reachable" | Start the WhisperLiveKit server: `wlk serve --model large-v3 --language en --pcm-input`. Or use `--engine local`. |
 | No text appears | Verify your mic: `faster-whisper-dictation transcribe --record 5` |
 | Wrong microphone | List devices with `faster-whisper-dictation devices` and set `audio.device` in config. |
 | Text in wrong window | Text is typed into the focused window when transcription completes. Keep focus on target app. |
-| Whisper hallucinations | Increase VAD threshold: `vad.threshold = 0.7` in config. |
+| Whisper hallucinations | Increase VAD threshold: `vad.threshold = 0.7` in config. In streaming mode, repeated phrases (e.g. "Thank you") during silence are auto-suppressed after 2 occurrences. |
 | Wrong words (e.g. "passed" instead of "fast") | Set `server.prompt` or `server.hotwords` in config to bias transcription. |
 | ydotool not working | Run `sudo systemctl start ydotool` and add user to `input` group. |
 
@@ -396,7 +470,7 @@ faster-whisper-dictation start --server-url https://api.groq.com/openai
 # Clone and install dev dependencies
 git clone https://github.com/bhargavchippada/faster-whisper-dictation.git
 cd faster-whisper-dictation
-uv sync --dev
+uv sync --extra dev
 
 # Run tests
 uv run pytest -v
@@ -404,8 +478,9 @@ uv run pytest -v
 # Run tests with coverage
 uv run pytest tests/ --cov=whisper_dictation --cov-report=term-missing
 
-# Build fresh artifacts without cache
+# Build and install globally (editable — picks up code changes automatically)
 uv build --clear --no-cache
+uv tool install -e . --force
 
 # Lint
 uv run ruff check src/ tests/
@@ -417,7 +492,7 @@ Contributions are welcome. Please open an issue first to discuss what you'd like
 
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feature/my-change`)
-3. Install dev dependencies: `uv sync --dev`
+3. Install dev dependencies: `uv sync --extra dev`
 4. Write tests first, then implement
 5. Ensure tests pass and coverage is maintained
 6. Open a pull request

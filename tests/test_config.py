@@ -41,7 +41,7 @@ class TestDefaults:
 
     def test_vad_defaults(self):
         cfg = VADConfig()
-        assert cfg.threshold == 0.5
+        assert cfg.threshold == 0.6
         assert cfg.silence_ms == 200
         assert cfg.min_speech_ms == 250
 
@@ -308,6 +308,27 @@ class TestValidate:
         with pytest.raises(ValueError, match="hotkey.mode"):
             validate(cfg)
 
+    def test_invalid_hotkey_binding(self):
+        cfg = Config(hotkey=HotkeyConfig(binding='alt+v" & do shell script "echo pwned'))
+        with pytest.raises(ValueError, match="hotkey.binding"):
+            validate(cfg)
+
+    def test_empty_hotkey_binding(self):
+        cfg = Config(hotkey=HotkeyConfig(binding=""))
+        with pytest.raises(ValueError, match="hotkey.binding"):
+            validate(cfg)
+
+    def test_valid_hotkey_bindings(self):
+        for binding in ("alt+v", "ctrl+shift+d", "super+a", "V", "meta+z"):
+            cfg = Config(hotkey=HotkeyConfig(binding=binding))
+            validate(cfg)  # should not raise
+
+    def test_invalid_hotkey_binding_unsupported_key(self):
+        for binding in ("F12", "alt+1", "ctrl+space"):
+            cfg = Config(hotkey=HotkeyConfig(binding=binding))
+            with pytest.raises(ValueError, match="hotkey.binding"):
+                validate(cfg)
+
     def test_invalid_engine_type(self):
         cfg = Config(engine=EngineConfig(type="bad"))
         with pytest.raises(ValueError, match="engine.type"):
@@ -403,6 +424,23 @@ class TestValidate:
         with pytest.raises(ValueError, match="websocket.reconnect_delay"):
             validate(cfg)
 
+    # Temperature validation
+
+    def test_temperature_out_of_range(self):
+        cfg = Config(server=ServerConfig(temperature=1.5))
+        with pytest.raises(ValueError, match="server.temperature"):
+            validate(cfg)
+
+    def test_temperature_nan(self):
+        cfg = Config(server=ServerConfig(temperature=float("nan")))
+        with pytest.raises(ValueError, match="server.temperature"):
+            validate(cfg)
+
+    def test_max_speech_s_inf(self):
+        cfg = Config(vad=VADConfig(max_speech_s=float("inf")))
+        with pytest.raises(ValueError, match="vad.max_speech_s"):
+            validate(cfg)
+
     # Language validation
 
     def test_language_valid_codes(self):
@@ -471,4 +509,3 @@ class TestApplyEnvOverridesBoolCoercion:
         with patch.dict("os.environ", {"DICTATION_MODE": "YES"}, clear=True):
             result = _apply_env_overrides(cfg)
         assert result.hotkey.mode is True
-

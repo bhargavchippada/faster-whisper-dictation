@@ -70,7 +70,7 @@ def _audio_to_int16_bytes(audio: np.ndarray) -> bytes:
     if audio.dtype == np.int16:
         return audio.tobytes()
     if audio.dtype in (np.float32, np.float64):
-        return np.clip(audio * 32767.0, -32768, 32767).astype(np.int16).tobytes()
+        return np.clip(audio * 32768.0, -32768, 32767).astype(np.int16).tobytes()
     return (audio.astype(np.float32) / 32768.0 * 32767.0).astype(np.int16).tobytes()
 
 
@@ -110,11 +110,12 @@ class WhisperLiveKitEngine:
         self._language = language
         if reconnect_attempts < 0:
             raise ValueError("reconnect_attempts must be >= 0")
-        if reconnect_delay <= 0:
-            raise ValueError("reconnect_delay must be > 0")
+        if reconnect_delay < 0.1:
+            raise ValueError("reconnect_delay must be >= 0.1")
         self._reconnect_attempts = reconnect_attempts
         self._reconnect_delay = reconnect_delay
         self._on_text = on_text or (lambda t: None)
+        self._has_on_text = on_text is not None
         self._uid = str(uuid.uuid4())
 
         self._ws = None
@@ -128,9 +129,13 @@ class WhisperLiveKitEngine:
         self._flush_done = threading.Event()
         self._eoa_sent = False
 
-        # Lock protects _latest_full_text shared between caller and receiver.
+        # Lock protects shared state between caller and receiver threads.
         self._seg_lock = threading.Lock()
         self._latest_full_text: str = ""
+        self._emitted_len: int = 0  # chars already streamed via on_text
+        self._streamed_stable_text: str = ""
+        self._last_stable_change: float = 0.0  # monotonic time of last text growth
+        self._pending_word_flushed: bool = False  # True if trailing word was time-flushed
 
     @property
     def ws_url(self) -> str:
@@ -152,6 +157,10 @@ class WhisperLiveKitEngine:
                 break
         with self._seg_lock:
             self._latest_full_text = ""
+            self._emitted_len = 0
+            self._streamed_stable_text = ""
+            self._last_stable_change = 0.0
+            self._pending_word_flushed = False
             self._eoa_sent = False
         self._uid = str(uuid.uuid4())
 
@@ -216,7 +225,7 @@ class WhisperLiveKitEngine:
         if not self._connected.is_set():
             return
         data = _audio_to_int16_bytes(audio)
-        while not self._stop_event.is_set():
+        while not self._stop_event.is_set() and self._connected.is_set():
             try:
                 self._send_queue.put(data, timeout=0.5)
                 return
@@ -336,13 +345,15 @@ class WhisperLiveKitEngine:
             log.debug("WLK %s thread was never started", name)
 
     def get_pending_text(self) -> str:
-        """Return the latest accumulated transcription text.
+        """Return any text not yet emitted via on_text callbacks.
 
-        WhisperLiveKit updates lines in-place, so this always returns
-        the most recent full text. Text is emitted once on deactivation.
+        In streaming mode, incremental text is emitted as it arrives.
+        This returns the remainder (if any) for the deactivation fallback.
         """
         with self._seg_lock:
-            return self._latest_full_text
+            if self._emitted_len >= len(self._latest_full_text):
+                return ""
+            return self._latest_full_text[self._emitted_len:].strip()
 
     def is_available(self) -> bool:
         """Check if the WhisperLiveKit server is reachable."""
@@ -398,6 +409,7 @@ class WhisperLiveKitEngine:
                 try:
                     raw = ws.recv(timeout=0.5)
                 except TimeoutError:
+                    self._maybe_flush_pending_word()
                     continue
                 except Exception:
                     if not self._stop_event.is_set():
@@ -427,6 +439,40 @@ class WhisperLiveKitEngine:
             self._stop_event.set()
             self._flush_done.set()
 
+    # Seconds to wait before emitting a trailing word that has no following space.
+    _WORD_FLUSH_TIMEOUT_S = 1.5
+
+    def _maybe_flush_pending_word(self) -> None:
+        """Emit the trailing partial word if stable text hasn't changed recently.
+
+        Called from the receiver loop on recv timeout (~0.5s). If the last
+        stable text change was >_WORD_FLUSH_TIMEOUT_S ago and there is an
+        unemitted trailing word, emit it now rather than waiting for the
+        next word to arrive.
+        """
+        if not self._has_on_text:
+            return
+        new_text: str = ""
+        with self._seg_lock:
+            if self._pending_word_flushed:
+                return
+            if self._last_stable_change == 0.0:
+                return
+            elapsed = time.monotonic() - self._last_stable_change
+            if elapsed < self._WORD_FLUSH_TIMEOUT_S:
+                return
+            # Check for unemitted text beyond the cursor
+            full = self._latest_full_text
+            if self._emitted_len < len(full):
+                new_text = full[self._emitted_len:].strip()
+                if new_text:
+                    self._emitted_len = len(full)
+                    self._streamed_stable_text = full
+                    self._pending_word_flushed = True
+        if new_text:
+            log.debug("WLK time-flushed trailing word: %d chars", len(new_text))
+            self._on_text(new_text)
+
     def _handle_message(self, msg: dict[str, object]) -> None:
         """Process a WhisperLiveKit JSON message."""
         if not isinstance(msg, dict):
@@ -451,9 +497,9 @@ class WhisperLiveKitEngine:
         buffer_text = msg.get("buffer_transcription")
         if isinstance(lines, list) or isinstance(buffer_text, str):
             log.debug(
-                "WLK response: lines=%d, buffer=%r",
+                "WLK response: lines=%d, buffer=%d chars",
                 len(lines) if isinstance(lines, list) else 0,
-                (buffer_text[:80] if isinstance(buffer_text, str) else ""),
+                len(buffer_text) if isinstance(buffer_text, str) else 0,
             )
             self._process_response(
                 lines=lines if isinstance(lines, list) else [],
@@ -470,21 +516,92 @@ class WhisperLiveKitEngine:
 
         WhisperLiveKit updates lines in-place (the same line grows as
         transcription progresses) rather than appending new completed
-        segments. We track the full text and emit it on flush/close.
+        segments.
+
+        Streaming emission uses only *stable text* (from ``lines``),
+        not ``buffer_transcription``.  The buffer contains partial,
+        unstable text that the server may revise, causing mid-word
+        splits when emitted eagerly.  The buffer text is still stored
+        in ``_latest_full_text`` so ``get_pending_text()`` can return
+        it on deactivation.
 
         Args:
             lines: List of line dicts, each with "text" key. Typically
                 one line that keeps growing.
             buffer_text: Current partial/in-progress transcription text.
         """
-        valid_lines = [ln for ln in lines if isinstance(ln, dict)]
+        valid_lines = [ln for ln in lines[:_MAX_BATCH_LINES] if isinstance(ln, dict)]
 
-        # Build full text from all lines + buffer
-        line_texts = [ln.get("text", "").strip() for ln in valid_lines]
-        all_text_parts = [t for t in line_texts if t]
+        # Stable text: only from finalised lines (safe to emit)
+        line_texts = [
+            str(ln.get("text", "")).strip() for ln in valid_lines
+        ]
+        stable_text = " ".join(t for t in line_texts if t)
+
+        # Full text: lines + buffer (for batch / get_pending_text)
+        full_parts = [stable_text] if stable_text else []
         if buffer_text.strip():
-            all_text_parts.append(buffer_text.strip())
-        full_text = " ".join(all_text_parts)
+            full_parts.append(buffer_text.strip())
+        full_text = " ".join(full_parts)
 
+        # Cap to prevent excessive memory from oversized server responses
+        if len(full_text) > _MAX_MESSAGE_BYTES:
+            full_text = full_text[:_MAX_MESSAGE_BYTES]
+        if len(stable_text) > _MAX_MESSAGE_BYTES:
+            stable_text = stable_text[:_MAX_MESSAGE_BYTES]
+
+        # Detect incremental text for streaming emission.
+        # Uses startswith() to verify the server appended (not revised)
+        # text, then rfind(" ") to emit only complete words.  If the
+        # server revises earlier text we cannot retract what was already
+        # typed, so we suppress that delta and resync the cursor.
+        new_text: str = ""
         with self._seg_lock:
             self._latest_full_text = full_text
+            if not self._has_on_text:
+                return
+
+            prev = self._streamed_stable_text
+            if stable_text.startswith(prev):
+                # Append-only growth — emit complete words from the suffix
+                candidate = stable_text[len(prev):]
+                if candidate:
+                    # Text grew — record timestamp for time-based flush
+                    self._last_stable_change = time.monotonic()
+                    self._pending_word_flushed = False
+                last_space = candidate.rfind(" ")
+                if last_space > 0:
+                    emit_chunk = candidate[:last_space].strip()
+                    if emit_chunk:
+                        # Advance cursor past the space so next candidate
+                        # starts with the next word's first character.
+                        boundary = len(prev) + last_space + 1
+                        self._streamed_stable_text = stable_text[:boundary]
+                        self._emitted_len = boundary
+                        new_text = emit_chunk
+                # No space → partial word, hold for next update (or time flush)
+            elif len(stable_text) < len(prev):
+                # Text shrank — new utterance; reset and emit complete words
+                self._streamed_stable_text = ""
+                self._emitted_len = 0
+                last_space = stable_text.rfind(" ")
+                if last_space > 0:
+                    emit_chunk = stable_text[:last_space].strip()
+                    if emit_chunk:
+                        boundary = last_space + 1
+                        self._streamed_stable_text = stable_text[:boundary]
+                        self._emitted_len = boundary
+                        new_text = emit_chunk
+            else:
+                # In-place revision — suppress and resync cursor
+                log.debug(
+                    "WLK stable text revised in-place; suppressing incremental emit "
+                    "(previous=%d chars, current=%d chars)",
+                    len(prev), len(stable_text),
+                )
+                self._streamed_stable_text = stable_text
+                self._emitted_len = len(stable_text)
+
+        if new_text:
+            log.debug("WLK streaming text: %d chars", len(new_text))
+            self._on_text(new_text)

@@ -743,8 +743,9 @@ class TestWebSocketStreaming:
         daemon._audio = MagicMock()
 
         daemon._on_deactivate()
+        daemon._transcribe_pool.shutdown(wait=True)
 
-        mock_ws.flush.assert_called_once()
+        mock_ws.flush.assert_called_once_with(send_eoa=True)
         mock_ws.close.assert_called_once()
         assert daemon._ws_engine is None
 
@@ -762,8 +763,9 @@ class TestWebSocketStreaming:
         daemon._audio = MagicMock()
 
         daemon._on_deactivate()
+        daemon._transcribe_pool.shutdown(wait=True)
 
-        mock_ws.flush.assert_called_once()
+        mock_ws.flush.assert_called_once_with(send_eoa=True)
         mock_ws.wait_for_completion.assert_called_once()
         mock_ws.close.assert_called_once()
 
@@ -784,8 +786,27 @@ class TestWebSocketStreaming:
         daemon._audio = MagicMock()
 
         daemon._on_deactivate()
+        daemon._transcribe_pool.shutdown(wait=True)
 
         mock_type.assert_called_once_with("partial transcription ")
+        mock_ws.close.assert_called_once()
+
+    @patch("whisper_dictation.daemon.notify")
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_ws_deactivate_handles_flush_error(self, mock_create, mock_notify):
+        """WS streaming: deactivate handles flush error and still closes."""
+        mock_create.return_value = MagicMock()
+        daemon = DictationDaemon(Config(), streaming=True)
+        daemon._recording = True
+        mock_ws = MagicMock()
+        mock_ws.flush.side_effect = RuntimeError("connection lost")
+        daemon._ws_engine = mock_ws
+        daemon._audio = MagicMock()
+
+        daemon._on_deactivate()
+        daemon._transcribe_pool.shutdown(wait=True)
+
+        # close() should still be called even after flush error
         mock_ws.close.assert_called_once()
 
     @patch("whisper_dictation.daemon.type_text")
@@ -829,6 +850,65 @@ class TestWebSocketStreaming:
 
         # Should not raise
         daemon._on_ws_text("hello")
+
+    @patch("whisper_dictation.daemon.type_text")
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_ws_text_suppresses_repetition(self, mock_create, mock_type):
+        """WS streaming: repeated identical text is suppressed after 2 occurrences."""
+        mock_create.return_value = MagicMock()
+        daemon = DictationDaemon(Config(), streaming=True)
+
+        daemon._on_ws_text("Thank you")
+        daemon._on_ws_text("Thank you")
+        daemon._on_ws_text("Thank you")  # 3rd — suppressed
+        daemon._on_ws_text("Thank you")  # 4th — suppressed
+        assert mock_type.call_count == 2
+
+    @patch("whisper_dictation.daemon.type_text")
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_ws_text_repetition_resets_on_different_text(self, mock_create, mock_type):
+        """WS streaming: repetition counter resets when different text arrives."""
+        mock_create.return_value = MagicMock()
+        daemon = DictationDaemon(Config(), streaming=True)
+
+        daemon._on_ws_text("Thank you")
+        daemon._on_ws_text("Thank you")
+        daemon._on_ws_text("Hello")  # different — resets counter
+        daemon._on_ws_text("Hello")
+        assert mock_type.call_count == 4
+
+    @patch("whisper_dictation.daemon.type_text")
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_ws_text_repetition_ignores_punctuation(self, mock_create, mock_type):
+        """WS streaming: punctuation variations of same text are treated as repeats."""
+        mock_create.return_value = MagicMock()
+        daemon = DictationDaemon(Config(), streaming=True)
+
+        daemon._on_ws_text("Thank you.")
+        daemon._on_ws_text("Thank you!")
+        daemon._on_ws_text("Thank you")  # 3rd — suppressed
+        assert mock_type.call_count == 2
+
+    @patch("whisper_dictation.daemon.type_text")
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_ws_repeat_state_resets_on_activate(self, mock_create, mock_type):
+        """WS streaming: repetition counter resets on new recording session."""
+        mock_create.return_value = MagicMock()
+        daemon = DictationDaemon(Config(), streaming=True)
+
+        # Drive counter to suppression
+        daemon._on_ws_text("Thank you")
+        daemon._on_ws_text("Thank you")
+        daemon._on_ws_text("Thank you")  # suppressed
+        assert mock_type.call_count == 2
+
+        # Simulate new recording — reset counters
+        daemon._last_ws_text = ""
+        daemon._ws_repeat_count = 0
+
+        # After reset, same text should be allowed again
+        daemon._on_ws_text("Thank you")
+        assert mock_type.call_count == 3
 
     @patch("whisper_dictation.daemon.notify")
     @patch("whisper_dictation.daemon.create_engine")

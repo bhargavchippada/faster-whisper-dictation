@@ -7,6 +7,14 @@ from unittest.mock import MagicMock, patch
 from whisper_dictation.notifier import notify
 
 
+class TestNotifyEarlyReturn:
+    def test_empty_title_and_message_returns_immediately(self):
+        """notify("", "") should return without attempting any notification."""
+        with patch("whisper_dictation.notifier.subprocess.Popen") as mock_popen:
+            notify("", "")
+            mock_popen.assert_not_called()
+
+
 class TestNotifyLinux:
     @patch("whisper_dictation.notifier.sys")
     @patch("whisper_dictation.notifier.subprocess.Popen")

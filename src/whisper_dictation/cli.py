@@ -306,16 +306,16 @@ url = "http://localhost:8000"         # WhisperLiveKit server URL
 model = "Systran/faster-whisper-large-v3"
 language = "en"                       # Language code (e.g. "en", "es", "de")
 timeout = 10                          # Request timeout in seconds
-# prompt = ""                          # Bias transcription (e.g. domain terms)
+# prompt = ""                          # Domain vocabulary or style example (not instructions)
 # temperature = 0.0                    # 0.0 = accurate, higher = creative
 # hotwords = ""                        # Comma-separated words to boost
 
 [hotkey]
-binding = "alt+v"                     # Hotkey combo (e.g. "alt+v", "ctrl+shift+d")
+binding = "alt+v"                     # Modifiers + single letter (e.g. "alt+v", "ctrl+shift+d")
 mode = "toggle"                       # "toggle" (press to start/stop) or "hold" (hold to speak)
 
 [vad]
-threshold = 0.5                       # Speech detection sensitivity (0.0-1.0)
+threshold = 0.6                       # Speech detection sensitivity (0.0-1.0)
 silence_ms = 200                      # Wait after speech stops before transcribing (ms)
 min_speech_ms = 250                   # Ignore utterances shorter than this (ms)
 max_speech_s = 90.0                   # Maximum single utterance length (seconds)
@@ -344,7 +344,15 @@ def cmd_config(args: argparse.Namespace) -> None:
             print(f"Config already exists: {CONFIG_FILE}", file=sys.stderr)
             print("Use --force to overwrite.", file=sys.stderr)
             sys.exit(1)
-        CONFIG_FILE.write_text(_DEFAULT_CONFIG_TEMPLATE)
+        fd = os.open(
+            str(CONFIG_FILE),
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+        )
+        try:
+            os.write(fd, _DEFAULT_CONFIG_TEMPLATE.encode())
+        finally:
+            os.close(fd)
         print(f"Config written to: {CONFIG_FILE}")
         return
 
@@ -506,7 +514,10 @@ def main() -> None:
     # start
     p_start = sub.add_parser("start", help="Start the dictation daemon")
     p_start.add_argument("--mode", choices=["toggle", "hold"], help="hotkey mode")
-    p_start.add_argument("--hotkey", help="hotkey binding (e.g. 'alt+v', 'ctrl+shift+d')")
+    p_start.add_argument(
+        "--hotkey",
+        help="hotkey binding: modifiers + single letter (e.g. 'alt+v', 'ctrl+shift+d')",
+    )
     p_start.add_argument("--engine", choices=["server", "local"], help="transcription engine")
     p_start.add_argument("--server-url", help="whisper server URL")
     p_start.add_argument(
