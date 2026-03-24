@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from whisper_dictation.hotkey.listener import (
     HotkeyListener,
+    _parse_hold_debounce_ms,
     _parse_hotkey,
     _parse_poll_ms,
     _throttle_pynput_xrecord,
@@ -56,6 +58,20 @@ class TestParsePollMs:
 
     def test_minimum_is_enforced(self):
         assert _parse_poll_ms("1") == 10
+
+
+class TestParseHoldDebounceMs:
+    def test_default_value(self):
+        assert _parse_hold_debounce_ms("150") == 0.15
+
+    def test_clamps_minimum(self):
+        assert _parse_hold_debounce_ms("10") == 0.05
+
+    def test_clamps_maximum(self):
+        assert _parse_hold_debounce_ms("1000") == 0.5
+
+    def test_invalid_uses_default(self):
+        assert _parse_hold_debounce_ms("abc") == 0.25
 
 
 # ---------------------------------------------------------------------------
@@ -107,6 +123,7 @@ class TestToggleMode:
         listener, activate, deactivate = toggle_listener
         with patch("time.monotonic", side_effect=[1.0, 2.0]):
             listener._handle_press()
+            listener._key_released = True  # simulate physical key release
             listener._handle_press()
         assert listener._active is False
         activate.assert_called_once()
@@ -116,7 +133,9 @@ class TestToggleMode:
         listener, activate, deactivate = toggle_listener
         with patch("time.monotonic", side_effect=[1.0, 2.0, 3.0]):
             listener._handle_press()  # ON
+            listener._key_released = True
             listener._handle_press()  # OFF
+            listener._key_released = True
             listener._handle_press()  # ON
         assert listener._active is True
         assert activate.call_count == 2
@@ -143,19 +162,39 @@ class TestToggleMode:
         deactivate.assert_not_called()
 
     def test_toggle_debounce_allows_after_threshold(self, toggle_listener):
-        """Presses after 150ms debounce window are accepted."""
+        """Presses after 150ms debounce window are accepted if key was released."""
         listener, activate, deactivate = toggle_listener
         with patch("time.monotonic", side_effect=[1.0, 1.2]):
             listener._handle_press()  # ON at 1.0
+            listener._key_released = True  # simulate physical release
             listener._handle_press()  # 200ms later — accepted, OFF
         assert listener._active is False
         activate.assert_called_once()
         deactivate.assert_called_once()
 
+    def test_toggle_ignores_auto_repeat(self, toggle_listener):
+        """Auto-repeat presses (no key release between) don't toggle off."""
+        listener, activate, deactivate = toggle_listener
+        with patch("time.monotonic", side_effect=[1.0, 2.0, 3.0]):
+            listener._handle_press()  # ON
+            # No _key_released = True → simulates auto-repeat
+            listener._handle_press()  # ignored (key not released)
+            listener._handle_press()  # ignored (key not released)
+        assert listener._active is True
+        activate.assert_called_once()
+        deactivate.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # _handle_press / _handle_release — hold mode
 # ---------------------------------------------------------------------------
+
+
+def _join_watcher(listener: HotkeyListener, timeout: float = 1.0) -> None:
+    """Deterministically wait for the release watcher thread to finish."""
+    t = listener._release_watcher
+    if t is not None:
+        t.join(timeout=timeout)
 
 
 class TestHoldMode:
@@ -177,6 +216,7 @@ class TestHoldMode:
         listener, activate, deactivate = hold_listener
         listener._handle_press()
         listener._handle_release()
+        _join_watcher(listener)
         assert listener._active is False
         deactivate.assert_called_once()
 
@@ -190,6 +230,54 @@ class TestHoldMode:
     def test_release_without_press_no_deactivate(self, hold_listener):
         listener, activate, deactivate = hold_listener
         listener._handle_release()
+        deactivate.assert_not_called()
+
+    def test_auto_repeat_burst_survives(self, hold_listener):
+        """Simulate 50+ rapid release/press pairs (X11 auto-repeat at 33Hz).
+
+        Only one deactivation should fire after the final real release.
+        """
+        listener, activate, deactivate = hold_listener
+        listener._handle_press()
+        activate.assert_called_once()
+
+        # Simulate ~1.5s of auto-repeat at 33Hz
+        for _ in range(50):
+            listener._handle_release()
+            time.sleep(0.002)  # 2ms between release and re-press
+            listener._handle_press()
+
+        # During the burst, should still be active, no deactivation
+        assert listener._active is True
+        deactivate.assert_not_called()
+
+        # Final real release (no re-press)
+        listener._handle_release()
+        _join_watcher(listener)
+        assert listener._active is False
+        deactivate.assert_called_once()
+        activate.assert_called_once()  # still only one activation
+
+    def test_watcher_exits_on_stop(self, hold_listener):
+        """Watcher thread exits cleanly when stop() is called during hold."""
+        listener, activate, deactivate = hold_listener
+        listener._handle_press()
+        listener._handle_release()
+        # stop() joins the watcher thread synchronously
+        listener.stop()
+        deactivate.assert_not_called()
+        assert listener._release_stamp == 0.0
+
+    def test_release_stamp_cleared_on_repress(self, hold_listener):
+        """Re-press clears the release stamp, preventing deactivation."""
+        listener, activate, deactivate = hold_listener
+        listener._handle_press()
+        listener._handle_release()
+        assert listener._release_stamp > 0.0
+        # Re-press cancels the pending release
+        listener._handle_press()
+        assert listener._release_stamp == 0.0
+        _join_watcher(listener)
         deactivate.assert_not_called()
 
 
@@ -352,6 +440,24 @@ class TestStartStop:
         assert listener._listener is None
 
 
+    def test_stop_clears_release_stamp_and_joins_watcher(self):
+        """stop() zeroes _release_stamp and joins _release_watcher."""
+        listener = HotkeyListener(
+            binding="alt+v", mode="hold",
+            on_activate=MagicMock(), on_deactivate=MagicMock(),
+        )
+        # Simulate a pending release
+        listener._release_stamp = 12345.0
+        mock_watcher = MagicMock()
+        listener._release_watcher = mock_watcher
+        listener.stop()
+        assert listener._release_stamp == 0.0
+        mock_watcher.join.assert_called_once()
+        join_timeout = mock_watcher.join.call_args[1]["timeout"]
+        assert join_timeout > 0.1  # at least debounce + margin
+        assert listener._release_watcher is None
+
+
 # ---------------------------------------------------------------------------
 # _start_pynput — pynput listener integration
 # ---------------------------------------------------------------------------
@@ -450,23 +556,21 @@ class TestStartPynput:
         mock_keyboard = self._make_mock_keyboard()
         on_press, on_release = self._start_with_mock(listener, mock_keyboard)
 
-        # Use monotonic mock to simulate >50ms elapsed (bypasses debounce)
-        time_values = iter([1.0, 1.1])  # press at 1.0, release check at 1.1 (100ms gap)
-        with patch("time.monotonic", side_effect=time_values):
-            # Press alt, then v to activate
-            on_press(mock_keyboard.Key.alt)
-            mock_v_key = MagicMock()
-            mock_v_key.char = "v"
-            mock_v_key.name = "v"
-            on_press(mock_v_key)
-            activate.assert_called_once()
+        # Press alt, then v to activate
+        on_press(mock_keyboard.Key.alt)
+        mock_v_key = MagicMock()
+        mock_v_key.char = "v"
+        mock_v_key.name = "v"
+        on_press(mock_v_key)
+        activate.assert_called_once()
 
-            # Release v -> should deactivate in hold mode
-            on_release(mock_v_key)
+        # Release v -> deferred by watcher thread (150ms debounce)
+        on_release(mock_v_key)
+        _join_watcher(listener)
         deactivate.assert_called_once()
 
-    def test_pynput_on_release_hold_mode_debounce_ignores_rapid_release(self):
-        """Test hold mode ignores release within 50ms of press (debounce)."""
+    def test_pynput_auto_repeat_does_not_deactivate(self):
+        """Test hold mode survives rapid release/press from X11 auto-repeat."""
         activate = MagicMock()
         deactivate = MagicMock()
         listener = HotkeyListener("alt+v", "hold", activate, deactivate)
@@ -474,19 +578,28 @@ class TestStartPynput:
         mock_keyboard = self._make_mock_keyboard()
         on_press, on_release = self._start_with_mock(listener, mock_keyboard)
 
-        # Simulate rapid press/release (auto-repeat): elapsed < 50ms
-        time_values = iter([1.0, 1.01])  # 10ms gap — should be debounced
-        with patch("time.monotonic", side_effect=time_values):
-            on_press(mock_keyboard.Key.alt)
-            mock_v_key = MagicMock()
-            mock_v_key.char = "v"
-            mock_v_key.name = "v"
-            on_press(mock_v_key)
-            activate.assert_called_once()
+        # Activate
+        on_press(mock_keyboard.Key.alt)
+        mock_v_key = MagicMock()
+        mock_v_key.char = "v"
+        mock_v_key.name = "v"
+        on_press(mock_v_key)
+        activate.assert_called_once()
 
-            # Release v within debounce window — should NOT deactivate
-            on_release(mock_v_key)
+        # Simulate auto-repeat: release then immediate re-press
+        on_release(mock_v_key)
+        time.sleep(0.01)
+        on_press(mock_v_key)  # re-press cancels pending release
+
+        _join_watcher(listener)
+        # Should still be active — re-press cancelled the release
         deactivate.assert_not_called()
+        assert listener._active is True
+
+        # Now truly release
+        on_release(mock_v_key)
+        _join_watcher(listener)
+        deactivate.assert_called_once()
 
     def test_pynput_on_release_modifier_hold_mode_deactivates(self):
         """Test releasing modifier in hold mode deactivates."""
@@ -506,6 +619,7 @@ class TestStartPynput:
 
         # Release alt -> should deactivate since modifier no longer held
         on_release(mock_keyboard.Key.alt)
+        _join_watcher(listener)
         deactivate.assert_called_once()
 
     def test_pynput_key_name_for_special_key(self):
@@ -808,6 +922,7 @@ class TestEvdevLoop:
                 pass
 
         activate.assert_called_once()
+        _join_watcher(listener)
         deactivate.assert_called_once()
 
     def test_evdev_loop_modifier_release_hold_mode(self):
@@ -858,6 +973,7 @@ class TestEvdevLoop:
                 pass
 
         activate.assert_called_once()
+        _join_watcher(listener)
         deactivate.assert_called_once()
 
     def test_evdev_loop_non_key_event_ignored(self):
@@ -906,7 +1022,7 @@ class TestEvdevLoop:
         activate.assert_not_called()
 
     def test_evdev_loop_read_error_handled(self):
-        """Test evdev loop handles read errors gracefully."""
+        """Test evdev loop handles non-OSError read errors gracefully."""
         listener = HotkeyListener("alt+v", "toggle", MagicMock(), MagicMock())
 
         mock_evdev, mock_ecodes = self._make_mock_evdev()
@@ -922,7 +1038,8 @@ class TestEvdevLoop:
         mock_evdev.list_devices.return_value = ["/dev/input/event0"]
         mock_evdev.InputDevice.return_value = mock_dev
 
-        mock_dev.read.side_effect = OSError("device error")
+        # Non-OSError keeps device in list (generic exception path)
+        mock_dev.read.side_effect = ValueError("unexpected")
 
         call_count = [0]
 
@@ -943,6 +1060,76 @@ class TestEvdevLoop:
                 listener._evdev_loop()
             except KeyboardInterrupt:
                 pass
+
+    def test_evdev_loop_device_removed_on_oserror(self):
+        """Test evdev loop removes device and returns when last device raises OSError."""
+        listener = HotkeyListener("alt+v", "toggle", MagicMock(), MagicMock())
+
+        mock_evdev, mock_ecodes = self._make_mock_evdev()
+
+        KEY_V = mock_ecodes.KEY_V
+
+        mock_dev = MagicMock()
+        caps = {mock_ecodes.EV_KEY: [KEY_V]}
+        mock_dev.capabilities.return_value = caps
+        mock_dev.name = "Test Keyboard"
+        mock_dev.path = "/dev/input/event0"
+
+        mock_evdev.list_devices.return_value = ["/dev/input/event0"]
+        mock_evdev.InputDevice.return_value = mock_dev
+
+        mock_dev.read.side_effect = OSError("device unplugged")
+
+        def mock_select(rlist, wlist, xlist, timeout):
+            return [mock_dev], [], []
+
+        with (
+            patch.dict(
+                "sys.modules",
+                {"evdev": mock_evdev, "evdev.ecodes": mock_ecodes, "select": MagicMock()},
+            ),
+            patch("select.select", side_effect=mock_select),
+        ):
+            # Should return cleanly when last device is removed
+            listener._evdev_loop()
+
+        # Device should have been closed
+        mock_dev.close.assert_called_once()
+
+    def test_evdev_loop_device_removed_close_error_suppressed(self):
+        """Test dev.close() exception is suppressed during OSError recovery."""
+        listener = HotkeyListener("alt+v", "toggle", MagicMock(), MagicMock())
+
+        mock_evdev, mock_ecodes = self._make_mock_evdev()
+
+        KEY_V = mock_ecodes.KEY_V
+
+        mock_dev = MagicMock()
+        caps = {mock_ecodes.EV_KEY: [KEY_V]}
+        mock_dev.capabilities.return_value = caps
+        mock_dev.name = "Test Keyboard"
+        mock_dev.path = "/dev/input/event0"
+
+        mock_evdev.list_devices.return_value = ["/dev/input/event0"]
+        mock_evdev.InputDevice.return_value = mock_dev
+
+        mock_dev.read.side_effect = OSError("device unplugged")
+        mock_dev.close.side_effect = RuntimeError("close failed")
+
+        def mock_select(rlist, wlist, xlist, timeout):
+            return [mock_dev], [], []
+
+        with (
+            patch.dict(
+                "sys.modules",
+                {"evdev": mock_evdev, "evdev.ecodes": mock_ecodes, "select": MagicMock()},
+            ),
+            patch("select.select", side_effect=mock_select),
+        ):
+            # Should return cleanly even when dev.close() raises
+            listener._evdev_loop()
+
+        mock_dev.close.assert_called()
 
     def test_evdev_loop_device_without_target_key_skipped(self):
         """Test evdev skips devices that don't have the target key."""

@@ -1,0 +1,1443 @@
+"""Tests for whisper_dictation.engine.whisperlivekit — WhisperLiveKit engine."""
+
+from __future__ import annotations
+
+import json
+import threading
+import time
+from unittest.mock import MagicMock, patch
+
+import numpy as np
+import pytest
+
+from whisper_dictation.engine.whisperlivekit import (
+    _END_SENTINEL,
+    WhisperLiveKitEngine,
+    _audio_to_int16_bytes,
+    _http_to_ws_url,
+    _is_loopback,
+)
+
+# ---------------------------------------------------------------------------
+# URL conversion
+# ---------------------------------------------------------------------------
+
+
+class TestHttpToWsUrl:
+    def test_http_to_ws_with_asr_path(self):
+        url = _http_to_ws_url("http://localhost:8000", path="/asr", language="en")
+        assert url == "ws://localhost:8000/asr?language=en"
+
+    def test_https_to_wss(self):
+        url = _http_to_ws_url("https://api.example.com", path="/asr", language="fr")
+        assert url == "wss://api.example.com/asr?language=fr"
+
+    def test_preserves_existing_path(self):
+        url = _http_to_ws_url("http://host:8080/api", path="/asr", language="en")
+        assert url == "ws://host:8080/api/asr?language=en"
+
+    def test_rejects_non_http_scheme(self):
+        with pytest.raises(ValueError, match="must use http or https"):
+            _http_to_ws_url("ftp://host:21", path="/asr", language="en")
+
+    def test_strips_trailing_slash(self):
+        url = _http_to_ws_url("http://localhost:8000/", path="/asr", language="en")
+        assert "/asr" in url
+
+
+class TestIsLoopback:
+    def test_localhost(self):
+        assert _is_loopback("http://localhost:8000") is True
+
+    def test_ipv4_loopback(self):
+        assert _is_loopback("http://127.0.0.1:8000") is True
+
+    def test_remote_host(self):
+        assert _is_loopback("http://example.com") is False
+
+    def test_empty_host(self):
+        assert _is_loopback("http://") is True
+
+    def test_non_ip_hostname(self):
+        assert _is_loopback("http://myserver.local") is False
+
+
+# ---------------------------------------------------------------------------
+# Audio conversion
+# ---------------------------------------------------------------------------
+
+
+class TestAudioToInt16Bytes:
+    def test_float32_input(self):
+        audio = np.array([0.5, -0.5, 1.0, -1.0], dtype=np.float32)
+        result = _audio_to_int16_bytes(audio)
+        arr = np.frombuffer(result, dtype=np.int16)
+        assert arr[0] == 16384  # 0.5 * 32768 = 16384
+        assert arr[1] == -16384
+        assert arr[2] == 32767  # clipped
+        assert arr[3] == -32768  # -1.0 * 32768 = -32768
+
+    def test_float64_input(self):
+        audio = np.array([0.0, 0.5], dtype=np.float64)
+        result = _audio_to_int16_bytes(audio)
+        arr = np.frombuffer(result, dtype=np.int16)
+        assert arr[0] == 0
+        assert arr[1] == 16384  # 0.5 * 32768 = 16384
+
+    def test_int16_passthrough(self):
+        audio = np.array([100, -200, 32767], dtype=np.int16)
+        result = _audio_to_int16_bytes(audio)
+        assert result == audio.tobytes()
+
+    def test_other_dtype_converted(self):
+        audio = np.array([16384, -16384], dtype=np.int32)
+        result = _audio_to_int16_bytes(audio)
+        arr = np.frombuffer(result, dtype=np.int16)
+        assert len(arr) == 2
+
+
+# ---------------------------------------------------------------------------
+# Engine init
+# ---------------------------------------------------------------------------
+
+
+class TestWhisperLiveKitEngineInit:
+    def test_default_init(self):
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        assert engine._server_url == "http://localhost:8000"
+        assert engine._language == "en"
+        assert engine._reconnect_attempts == 3
+
+    def test_strips_trailing_slash(self):
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000/", language="en",
+        )
+        assert engine._server_url == "http://localhost:8000"
+
+    def test_negative_reconnect_raises(self):
+        with pytest.raises(ValueError, match="reconnect_attempts must be >= 0"):
+            WhisperLiveKitEngine(
+                server_url="http://localhost:8000",                language="en", reconnect_attempts=-1,
+            )
+
+    def test_zero_reconnect_delay_raises(self):
+        with pytest.raises(ValueError, match="reconnect_delay must be >= 0.1"):
+            WhisperLiveKitEngine(
+                server_url="http://localhost:8000", language="en", reconnect_delay=0.0,
+            )
+
+    def test_negative_reconnect_delay_raises(self):
+        with pytest.raises(ValueError, match="reconnect_delay must be >= 0.1"):
+            WhisperLiveKitEngine(
+                server_url="http://localhost:8000", language="en", reconnect_delay=-1.0,
+            )
+
+    def test_ws_url_property(self):
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="fr",
+        )
+        assert engine.ws_url == "ws://localhost:8000/asr?language=fr"
+
+    def test_on_text_default_noop(self):
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        engine._on_text("test")  # should not raise
+
+
+# ---------------------------------------------------------------------------
+# Connect
+# ---------------------------------------------------------------------------
+
+
+class TestConnect:
+    @patch("whisper_dictation.engine.whisperlivekit.ws_sync")
+    def test_connect_success(self, mock_ws_mod):
+        mock_ws = MagicMock()
+        mock_ws_mod.connect.return_value = mock_ws
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        engine.connect()
+        assert engine._connected.is_set()
+        mock_ws_mod.connect.assert_called_once()
+        engine.close()
+
+    @patch("whisper_dictation.engine.whisperlivekit.ws_sync")
+    def test_connect_retry_on_failure(self, mock_ws_mod):
+        mock_ws_mod.connect.side_effect = [ConnectionRefusedError, MagicMock()]
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+            reconnect_attempts=1, reconnect_delay=0.1,
+        )
+        engine.connect()
+        assert engine._connected.is_set()
+        assert mock_ws_mod.connect.call_count == 2
+        engine.close()
+
+    @patch("whisper_dictation.engine.whisperlivekit.ws_sync")
+    def test_connect_all_retries_exhausted(self, mock_ws_mod):
+        mock_ws_mod.connect.side_effect = ConnectionRefusedError("refused")
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+            reconnect_attempts=1, reconnect_delay=0.1,
+        )
+        with pytest.raises(ConnectionRefusedError):
+            engine.connect()
+        assert not engine._connected.is_set()
+
+    @patch("whisper_dictation.engine.whisperlivekit.ws_sync")
+    def test_connect_non_localhost_warning(self, mock_ws_mod):
+        mock_ws_mod.connect.return_value = MagicMock()
+        engine = WhisperLiveKitEngine(
+            server_url="http://remote.example.com", language="en",
+        )
+        with patch("whisper_dictation.engine.whisperlivekit.log") as mock_log:
+            engine.connect()
+            mock_log.warning.assert_called()
+        engine.close()
+
+    @patch("whisper_dictation.engine.whisperlivekit.ws_sync")
+    def test_connect_resets_state(self, mock_ws_mod):
+        mock_ws_mod.connect.return_value = MagicMock()
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        engine._latest_full_text = "old"
+        engine.connect()
+        assert engine._latest_full_text == ""
+        engine.close()
+
+    @patch("whisper_dictation.engine.whisperlivekit.ws_sync")
+    def test_connect_no_client_handshake_sent(self, mock_ws_mod):
+        """WhisperLiveKit: no JSON config sent from client."""
+        mock_ws = MagicMock()
+        mock_ws_mod.connect.return_value = mock_ws
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        engine.connect()
+        # The WS should NOT have send() called for a config message
+        mock_ws.send.assert_not_called()
+        engine.close()
+
+
+
+# ---------------------------------------------------------------------------
+# Send audio
+# ---------------------------------------------------------------------------
+
+
+class TestSendAudio:
+    def test_sends_int16_bytes(self):
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        engine._connected.set()
+        audio = np.zeros(512, dtype=np.float32)
+        engine.send_audio(audio)
+        data = engine._send_queue.get_nowait()
+        assert isinstance(data, bytes)
+        arr = np.frombuffer(data, dtype=np.int16)
+        assert len(arr) == 512
+
+    def test_not_connected_ignores(self):
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        engine.send_audio(np.zeros(10, dtype=np.float32))
+        assert engine._send_queue.empty()
+
+    def test_full_queue_drops(self):
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        engine._connected.set()
+        # Fill the queue
+        for _ in range(100):
+            engine._send_queue.put(b"x")
+        engine.send_audio(np.zeros(10, dtype=np.float32))  # should not raise
+
+
+# ---------------------------------------------------------------------------
+# Flush
+# ---------------------------------------------------------------------------
+
+
+class TestFlush:
+    def test_flush_sends_eoa_sentinel(self):
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        engine._connected.set()
+        engine.flush(send_eoa=True)
+        data = engine._send_queue.get_nowait()
+        assert data is _END_SENTINEL
+
+    def test_flush_no_eoa(self):
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        engine._connected.set()
+        engine.flush(send_eoa=False)
+        assert engine._send_queue.empty()
+
+    def test_flush_not_connected(self):
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        engine.flush()
+        assert engine._send_queue.empty()
+
+    def test_flush_queue_full(self):
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        engine._connected.set()
+        for _ in range(100):
+            engine._send_queue.put(b"x")
+        engine.flush(send_eoa=True)  # should not raise
+
+    def test_flush_sets_eoa_sent(self):
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        engine._connected.set()
+        engine.flush(send_eoa=True)
+        assert engine._eoa_sent is True
+
+    def test_flush_eoa_rollback_on_queue_full(self):
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        engine._connected.set()
+        for _ in range(100):
+            engine._send_queue.put(b"x")
+        engine.flush(send_eoa=True)
+        assert engine._eoa_sent is False
+
+
+# ---------------------------------------------------------------------------
+# Sender loop
+# ---------------------------------------------------------------------------
+
+
+class TestSenderLoop:
+    def test_sends_empty_frame_for_eoa(self):
+        mock_ws = MagicMock()
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000",            language="en", on_text=MagicMock(),
+        )
+        engine._ws = mock_ws
+        engine._send_queue.put(_END_SENTINEL)
+        engine._send_queue.put(None)
+        engine._sender_loop()
+        mock_ws.send.assert_called_once_with(b"")
+
+    def test_sends_audio_bytes(self):
+        mock_ws = MagicMock()
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        engine._ws = mock_ws
+        data = b"\x00" * 1024
+        engine._send_queue.put(data)
+        engine._send_queue.put(None)
+        engine._sender_loop()
+        mock_ws.send.assert_called_once_with(data)
+
+    def test_exits_on_none_sentinel(self):
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        engine._ws = MagicMock()
+        engine._send_queue.put(None)
+        engine._sender_loop()  # should return
+
+    def test_exits_on_send_error(self):
+        mock_ws = MagicMock()
+        mock_ws.send.side_effect = RuntimeError("broken")
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        engine._ws = mock_ws
+        engine._send_queue.put(b"audio")
+        engine._sender_loop()  # should not raise
+
+    def test_exits_when_ws_none(self):
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        engine._ws = None
+        engine._send_queue.put(b"audio")
+        engine._sender_loop()
+
+    def test_exits_on_stop_event(self):
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        engine._ws = MagicMock()
+        engine._stop_event.set()
+        engine._sender_loop()
+
+
+# ---------------------------------------------------------------------------
+# Receiver loop
+# ---------------------------------------------------------------------------
+
+
+class TestReceiverLoop:
+    def test_handles_timeout(self):
+        mock_ws = MagicMock()
+        call_count = 0
+
+        def fake_recv(timeout=None):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise TimeoutError
+            raise ConnectionError("closed")
+
+        mock_ws.recv.side_effect = fake_recv
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        engine._ws = mock_ws
+        engine._stop_event.set()  # exit after first iteration
+        engine._receiver_loop()
+
+    def test_ignores_binary_frames(self):
+        mock_ws = MagicMock()
+        mock_ws.recv.side_effect = [b"\x00\x01", ConnectionError]
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        engine._ws = mock_ws
+        engine._receiver_loop()
+
+    def test_skips_oversized_messages(self):
+        mock_ws = MagicMock()
+        big = "x" * (1024 * 1024 + 1)
+        mock_ws.recv.side_effect = [big, ConnectionError]
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        engine._ws = mock_ws
+        engine._receiver_loop()
+
+    def test_skips_invalid_json(self):
+        mock_ws = MagicMock()
+        mock_ws.recv.side_effect = ["not json{", ConnectionError]
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        engine._ws = mock_ws
+        engine._receiver_loop()
+
+    def test_dispatches_valid_message(self):
+        mock_ws = MagicMock()
+        msg = json.dumps({"type": "ready_to_stop"})
+        mock_ws.recv.side_effect = [msg, ConnectionError]
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        engine._ws = mock_ws
+        engine._eoa_sent = True
+        engine._receiver_loop()
+        assert engine._flush_done.is_set()
+
+    def test_exits_when_ws_none(self):
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        engine._ws = None
+        engine._receiver_loop()
+
+    def test_handles_message_exception(self):
+        mock_ws = MagicMock()
+        msg = json.dumps({"lines": "not-a-list", "buffer_transcription": 123})
+        mock_ws.recv.side_effect = [msg, ConnectionError]
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        engine._ws = mock_ws
+        engine._receiver_loop()  # should not raise
+
+
+# ---------------------------------------------------------------------------
+# Handle message
+# ---------------------------------------------------------------------------
+
+
+class TestHandleMessage:
+    def test_config_message(self):
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        engine._handle_message({"type": "config", "useAudioWorklet": True})
+        # Should not raise, just log
+
+    def test_ready_to_stop(self):
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        engine._eoa_sent = True
+        engine._handle_message({"type": "ready_to_stop"})
+        assert engine._flush_done.is_set()
+
+    def test_ready_to_stop_ignored_before_eoa(self):
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        engine._handle_message({"type": "ready_to_stop"})
+        assert not engine._flush_done.is_set()
+
+    def test_transcription_with_lines(self):
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        engine._handle_message({
+            "lines": [{"text": "hello world", "start": "0:00:00.00", "end": "0:00:01.00"}],
+            "buffer_transcription": "",
+        })
+        assert engine._latest_full_text == "hello world"
+
+    def test_transcription_with_buffer_only(self):
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        engine._handle_message({
+            "buffer_transcription": "partial text",
+        })
+        assert engine._latest_full_text == "partial text"
+
+    def test_non_dict_ignored(self):
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        engine._handle_message("not a dict")  # type: ignore[arg-type]
+
+    def test_unhandled_message(self):
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        engine._handle_message({"unknown": "field"})  # should just log
+
+
+# ---------------------------------------------------------------------------
+# Process response
+# ---------------------------------------------------------------------------
+
+
+class TestProcessResponse:
+    def test_tracks_full_text_from_lines(self):
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        engine._process_response(
+            lines=[{"text": "hello"}, {"text": "world"}],
+            buffer_text="",
+        )
+        assert engine._latest_full_text == "hello world"
+
+    def test_overwrites_full_text_on_each_call(self):
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        engine._process_response(lines=[{"text": "hello"}], buffer_text="")
+        assert engine._latest_full_text == "hello"
+        engine._process_response(lines=[{"text": "hello"}], buffer_text="partial")
+        assert engine._latest_full_text == "hello partial"
+
+    def test_updates_full_text_on_new_lines(self):
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        engine._process_response(lines=[{"text": "first"}], buffer_text="")
+        assert engine._latest_full_text == "first"
+        engine._process_response(
+            lines=[{"text": "first"}, {"text": "second"}],
+            buffer_text="",
+        )
+        assert engine._latest_full_text == "first second"
+
+    def test_tracks_full_text_with_buffer(self):
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        engine._process_response(
+            lines=[{"text": "hello"}],
+            buffer_text="world",
+        )
+        assert engine._latest_full_text == "hello world"
+
+    def test_replaces_full_text_each_call(self):
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        engine._process_response(
+            lines=[{"text": "hello"}],
+            buffer_text="",
+        )
+        assert engine._latest_full_text == "hello"
+        engine._process_response(
+            lines=[{"text": "hello"}, {"text": "world"}],
+            buffer_text="partial",
+        )
+        assert engine._latest_full_text == "hello world partial"
+
+    def test_skips_empty_text_lines(self):
+        cb = MagicMock()
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000",            language="en", on_text=cb,
+        )
+        engine._process_response(lines=[{"text": ""}, {"text": "  "}], buffer_text="")
+        cb.assert_not_called()
+
+    def test_skips_non_dict_lines(self):
+        cb = MagicMock()
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en", on_text=cb,
+        )
+        engine._process_response(lines=["not a dict", 42], buffer_text="")
+        cb.assert_not_called()
+
+    def test_streaming_emits_at_word_boundaries(self):
+        """Emit only complete words to prevent mid-word splits."""
+        cb = MagicMock()
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en", on_text=cb,
+        )
+        # Single word — no emission yet (could be partial like "Punctu")
+        engine._process_response(lines=[{"text": "hello"}], buffer_text="")
+        cb.assert_not_called()
+
+        # Second word arrives — first word is now confirmed complete
+        engine._process_response(lines=[{"text": "hello world"}], buffer_text="")
+        cb.assert_called_once_with("hello")
+        cb.reset_mock()
+
+        # Third word — second word emits
+        engine._process_response(lines=[{"text": "hello world foo"}], buffer_text="")
+        cb.assert_called_once_with("world")
+
+        # Trailing word available via get_pending_text (deactivation fallback)
+        pending = engine.get_pending_text()
+        assert "foo" in pending
+
+    def test_oversized_text_capped(self):
+        """Full text exceeding _MAX_MESSAGE_BYTES is truncated."""
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        big_text = "x" * (2 * 1024 * 1024)  # 2MB
+        engine._process_response(lines=[{"text": big_text}], buffer_text="")
+        assert len(engine._latest_full_text) <= 1 * 1024 * 1024
+
+    def test_streaming_resets_emitted_len_on_new_utterance(self):
+        """When text shrinks (new utterance), _emitted_len resets."""
+        cb = MagicMock()
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en", on_text=cb,
+        )
+        # First utterance — "hello" emits when "world" arrives
+        engine._process_response(lines=[{"text": "hello world"}], buffer_text="")
+        cb.assert_called_once_with("hello")
+        cb.reset_mock()
+        assert engine._emitted_len == 6  # cursor past space: "hello " (index 6)
+
+        # Server sends longer text
+        engine._process_response(lines=[{"text": "hello world done"}], buffer_text="")
+        cb.assert_called_once_with("world")
+        cb.reset_mock()
+
+        # New shorter utterance (server rolled over) — resets emitted_len
+        engine._process_response(lines=[{"text": "hi there"}], buffer_text="")
+        cb.assert_called_once_with("hi")
+        assert engine._emitted_len == 3  # cursor past space: "hi " (index 3)
+
+    def test_streaming_suppresses_in_place_revision(self):
+        """If stable text changes in-place (not prefix extension), suppress emit."""
+        cb = MagicMock()
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en", on_text=cb,
+        )
+        # Emit "hello" (word boundary), hold "there"
+        engine._process_response(lines=[{"text": "hello there"}], buffer_text="")
+        cb.assert_called_once_with("hello")
+        cb.reset_mock()
+
+        # Server revises beginning of text — no longer a prefix of previous
+        engine._process_response(lines=[{"text": "hallo there now"}], buffer_text="")
+        cb.assert_not_called()
+        assert engine._streamed_stable_text == "hallo there now"
+        assert engine._emitted_len == len("hallo there now")
+
+    def test_streaming_no_emit_without_callback(self):
+        """Without on_text, no streaming emission occurs."""
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        engine._process_response(lines=[{"text": "hello"}], buffer_text="")
+        assert engine._latest_full_text == "hello"
+        # No callback, _has_on_text is False — _emitted_len stays 0
+        assert engine._emitted_len == 0
+
+    def test_streaming_does_not_emit_buffer_text(self):
+        """Buffer text is partial/unstable — not emitted in streaming mode.
+
+        Only stable text from lines[] is emitted via on_text. Buffer text
+        is available via get_pending_text() for deactivation fallback.
+        """
+        cb = MagicMock()
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en", on_text=cb,
+        )
+        # Lines have "hello world", buffer has partial "wor"
+        engine._process_response(lines=[{"text": "hello world"}], buffer_text="wor")
+        cb.assert_called_once_with("hello")
+        # full text includes buffer, but emitted_len tracks only stable text
+        assert engine._latest_full_text == "hello world wor"
+        assert engine._emitted_len == 6  # cursor past space: "hello " (index 6)
+        cb.reset_mock()
+
+        # Server finalises into lines, buffer clears
+        engine._process_response(lines=[{"text": "hello world works"}], buffer_text="")
+        cb.assert_called_once_with("world")
+
+    def test_buffer_available_via_get_pending_text(self):
+        """Buffer text not emitted via on_text is available via get_pending_text."""
+        cb = MagicMock()
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en", on_text=cb,
+        )
+        engine._process_response(lines=[{"text": "hello"}], buffer_text="partial")
+        cb.assert_not_called()  # single word, no word boundary yet
+        # get_pending_text returns all unemitted text (hello + partial)
+        assert engine.get_pending_text() == "hello partial"
+
+
+# ---------------------------------------------------------------------------
+# Get pending text
+# ---------------------------------------------------------------------------
+
+
+class TestGetPendingText:
+    def test_returns_text_when_none_emitted(self):
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        engine._latest_full_text = "pending"
+        assert engine.get_pending_text() == "pending"
+
+    def test_returns_empty_when_no_text(self):
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        assert engine.get_pending_text() == ""
+
+
+# ---------------------------------------------------------------------------
+# Time-based word flush
+# ---------------------------------------------------------------------------
+
+
+class TestMaybeFlushPendingWord:
+    def test_flushes_trailing_word_after_timeout(self):
+        """Trailing word emitted after _WORD_FLUSH_TIMEOUT_S of inactivity."""
+        cb = MagicMock()
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en", on_text=cb,
+        )
+        # Simulate: "hello world" arrives, "hello" emitted, "world" held
+        engine._process_response(lines=[{"text": "hello world"}], buffer_text="")
+        cb.assert_called_once_with("hello")
+        cb.reset_mock()
+
+        # Simulate time passing beyond flush timeout
+        with engine._seg_lock:
+            engine._last_stable_change = time.monotonic() - 2.0
+
+        engine._maybe_flush_pending_word()
+        cb.assert_called_once_with("world")
+
+    def test_no_flush_before_timeout(self):
+        """No flush when text changed recently."""
+        cb = MagicMock()
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en", on_text=cb,
+        )
+        engine._process_response(lines=[{"text": "hello world"}], buffer_text="")
+        cb.reset_mock()
+
+        # last_stable_change is recent — should NOT flush
+        engine._maybe_flush_pending_word()
+        cb.assert_not_called()
+
+    def test_no_double_flush(self):
+        """Once flushed, does not emit again until new text arrives."""
+        cb = MagicMock()
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en", on_text=cb,
+        )
+        engine._process_response(lines=[{"text": "hello world"}], buffer_text="")
+        cb.reset_mock()
+
+        with engine._seg_lock:
+            engine._last_stable_change = time.monotonic() - 2.0
+
+        engine._maybe_flush_pending_word()
+        cb.assert_called_once_with("world")
+        cb.reset_mock()
+
+        # Second call — already flushed
+        engine._maybe_flush_pending_word()
+        cb.assert_not_called()
+
+    def test_flush_resets_on_new_text(self):
+        """New text arriving resets the flush flag, allowing future flushes."""
+        cb = MagicMock()
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en", on_text=cb,
+        )
+        engine._process_response(lines=[{"text": "hello world"}], buffer_text="")
+        cb.reset_mock()
+
+        # Flush the trailing "world"
+        with engine._seg_lock:
+            engine._last_stable_change = time.monotonic() - 2.0
+        engine._maybe_flush_pending_word()
+        cb.assert_called_once_with("world")
+        cb.reset_mock()
+
+        # New text arrives — should reset and allow new flush later
+        engine._process_response(lines=[{"text": "hello world foo"}], buffer_text="")
+        assert engine._pending_word_flushed is False
+
+    def test_noop_without_callback(self):
+        """No-op when engine has no on_text callback (batch mode)."""
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        # Set both stable and full text so the guard path is realistic
+        engine._latest_full_text = "pending"
+        engine._last_stable_text = "pending"
+        engine._last_stable_change = time.monotonic() - 2.0
+        engine._maybe_flush_pending_word()  # early return: _has_on_text is False
+        assert engine._pending_word_flushed is False
+
+    def test_noop_when_no_text_received(self):
+        """No-op when no text has ever been received."""
+        cb = MagicMock()
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en", on_text=cb,
+        )
+        engine._maybe_flush_pending_word()  # _last_stable_change == 0.0
+        cb.assert_not_called()
+
+    def test_noop_when_nothing_pending(self):
+        """No-op when all text has been emitted."""
+        cb = MagicMock()
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en", on_text=cb,
+        )
+        engine._process_response(
+            lines=[{"text": "hello world foo"}], buffer_text="",
+        )
+        cb.reset_mock()  # "hello world" emitted, "foo" pending
+
+        # Manually advance cursor to end of stable text (simulate all emitted)
+        with engine._seg_lock:
+            engine._emitted_len = len(engine._last_stable_text)
+            engine._last_stable_change = time.monotonic() - 2.0
+
+        engine._maybe_flush_pending_word()
+        cb.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Close
+# ---------------------------------------------------------------------------
+
+
+class TestClose:
+    def test_close_sets_events(self):
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        engine._connected.set()
+        engine.close()
+        assert not engine._connected.is_set()
+        assert engine._stop_event.is_set()
+        assert engine._flush_done.is_set()
+
+    def test_close_joins_threads(self):
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        mock_thread = MagicMock()
+        mock_thread.ident = 123
+        engine._sender_thread = mock_thread
+        engine._receiver_thread = mock_thread
+        engine.close()
+        assert mock_thread.join.called
+
+    def test_close_closes_ws(self):
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        mock_ws = MagicMock()
+        engine._ws = mock_ws
+        engine.close()
+        mock_ws.close.assert_called_once()
+        assert engine._ws is None
+
+    def test_close_ws_error_handled(self):
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        mock_ws = MagicMock()
+        mock_ws.close.side_effect = RuntimeError("oops")
+        engine._ws = mock_ws
+        engine.close()  # should not raise
+
+    def test_close_drains_queue(self):
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        engine._send_queue.put(b"data")
+        engine._send_queue.put(b"more")
+        engine.close()
+        assert engine._send_queue.empty()
+
+
+# ---------------------------------------------------------------------------
+# Join thread helper
+# ---------------------------------------------------------------------------
+
+
+class TestJoinThread:
+    def test_none_thread(self):
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        engine._join_thread(None, "test")  # should not raise
+
+    def test_unstarted_thread(self):
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        t = threading.Thread(target=lambda: None)
+        engine._join_thread(t, "test")  # should not raise
+
+    def test_alive_thread_timeout(self):
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        mock_thread = MagicMock()
+        mock_thread.ident = 1
+        mock_thread.is_alive.return_value = True
+        engine._join_thread(mock_thread, "test")
+        mock_thread.join.assert_called_once_with(timeout=2.0)
+
+    def test_runtime_error_handled(self):
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        mock_thread = MagicMock()
+        mock_thread.join.side_effect = RuntimeError("cannot join before start")
+        engine._join_thread(mock_thread, "test")  # should not raise
+
+
+# ---------------------------------------------------------------------------
+# Is available
+# ---------------------------------------------------------------------------
+
+
+class TestIsAvailable:
+    @patch("whisper_dictation.engine.whisperlivekit.ws_sync")
+    def test_available(self, mock_ws_mod):
+        mock_ws = MagicMock()
+        mock_ws_mod.connect.return_value.__enter__ = MagicMock(return_value=mock_ws)
+        mock_ws_mod.connect.return_value.__exit__ = MagicMock(return_value=False)
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        assert engine.is_available() is True
+        mock_ws.recv.assert_called_once_with(timeout=2.0)
+
+    @patch("whisper_dictation.engine.whisperlivekit.ws_sync")
+    def test_available_recv_timeout(self, mock_ws_mod):
+        """is_available returns True even if server config message times out."""
+        mock_ws = MagicMock()
+        mock_ws.recv.side_effect = TimeoutError
+        mock_ws_mod.connect.return_value.__enter__ = MagicMock(return_value=mock_ws)
+        mock_ws_mod.connect.return_value.__exit__ = MagicMock(return_value=False)
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        assert engine.is_available() is True
+
+    @patch("whisper_dictation.engine.whisperlivekit.ws_sync")
+    def test_not_available(self, mock_ws_mod):
+        mock_ws_mod.connect.side_effect = ConnectionRefusedError
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        assert engine.is_available() is False
+
+
+# ---------------------------------------------------------------------------
+# Transcribe batch
+# ---------------------------------------------------------------------------
+
+
+class TestTranscribeBatch:
+    def test_returns_transcribed_text(self):
+        """Batch mode: returns latest_full_text via get_pending_text()."""
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+
+        def fake_connect():
+            engine._connected.set()
+
+        def fake_wait(timeout=5.0):
+            with engine._seg_lock:
+                engine._latest_full_text = "hello world"
+            return True
+
+        with patch.object(engine, "connect", side_effect=fake_connect):
+            with patch.object(engine, "wait_for_completion", side_effect=fake_wait):
+                with patch.object(engine, "close"):
+                    result = engine.transcribe_batch(
+                        np.zeros(1024, dtype=np.float32),
+                    )
+
+        assert result == "hello world"
+
+    def test_fallback_to_latest_full_text(self):
+        """Batch mode: falls back to latest_full_text when no completed segs."""
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+
+        def fake_connect():
+            engine._connected.set()
+
+        def fake_wait(timeout=5.0):
+            engine._latest_full_text = "partial only"
+            return True
+
+        with patch.object(engine, "connect", side_effect=fake_connect):
+            with patch.object(engine, "wait_for_completion", side_effect=fake_wait):
+                with patch.object(engine, "close"):
+                    result = engine.transcribe_batch(
+                        np.zeros(512, dtype=np.float32),
+                    )
+
+        assert result == "partial only"
+
+    @patch("whisper_dictation.engine.whisperlivekit.ws_sync")
+    def test_connect_failure_raises(self, mock_ws_mod):
+        mock_ws_mod.connect.side_effect = ConnectionRefusedError
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+            reconnect_attempts=0,
+        )
+        with pytest.raises(ConnectionRefusedError):
+            engine.transcribe_batch(np.zeros(512, dtype=np.float32))
+
+    def test_close_called_in_finally(self):
+        """Batch mode: close() is always called after transcription."""
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+
+        def fake_connect():
+            engine._connected.set()
+
+        with patch.object(engine, "connect", side_effect=fake_connect):
+            with patch.object(engine, "wait_for_completion", return_value=True):
+                with patch.object(engine, "close") as mock_close:
+                    engine.transcribe_batch(np.zeros(512, dtype=np.float32))
+                    mock_close.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Send audio blocking
+# ---------------------------------------------------------------------------
+
+
+class TestSendAudioBlocking:
+    def test_sends_when_connected(self):
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        engine._connected.set()
+        engine._send_audio_blocking(np.zeros(10, dtype=np.float32))
+        assert not engine._send_queue.empty()
+
+    def test_ignores_when_not_connected(self):
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        engine._send_audio_blocking(np.zeros(10, dtype=np.float32))
+        assert engine._send_queue.empty()
+
+    def test_exits_when_stop_event_set(self):
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        engine._connected.set()
+        # Fill the queue so put() will block
+        for _ in range(100):
+            engine._send_queue.put(b"x")
+        # Set stop event — should exit the loop without hanging
+        engine._stop_event.set()
+        engine._send_audio_blocking(np.zeros(10, dtype=np.float32))
+        assert engine._send_queue.full()
+
+    def test_retries_on_full_queue_then_succeeds(self):
+        """Queue full on first put, then space opens up (covers lines 240-241)."""
+        import queue as queue_mod
+
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        engine._connected.set()
+
+        call_count = 0
+        original_put = engine._send_queue.put
+
+        def fake_put(data, timeout=None):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise queue_mod.Full
+            return original_put(data, timeout=0.1)
+
+        with patch.object(engine._send_queue, "put", side_effect=fake_put):
+            engine._send_audio_blocking(np.zeros(10, dtype=np.float32))
+
+        assert call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Connect: queue drain and exception cleanup (lines 164-167, 214-216)
+# ---------------------------------------------------------------------------
+
+
+class TestConnectQueueDrainAndCleanup:
+    @patch("whisper_dictation.engine.whisperlivekit.ws_sync")
+    def test_connect_drains_stale_queue(self, mock_ws_mod):
+        """connect() drains leftover items from previous session (lines 164-167)."""
+        mock_ws_mod.connect.return_value = MagicMock()
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        # Simulate stale data from a previous session
+        engine._send_queue.put(b"stale1")
+        engine._send_queue.put(b"stale2")
+        engine._eoa_sent = True
+
+        engine.connect()
+
+        # Queue should be drained (only the None sentinel from close may remain)
+        # and _eoa_sent should be reset
+        assert engine._eoa_sent is False
+        engine.close()
+
+    @patch("whisper_dictation.engine.whisperlivekit.ws_sync")
+    def test_connect_drain_handles_empty_race(self, mock_ws_mod):
+        """Queue drain handles TOCTOU: empty() False but get_nowait() raises Empty."""
+        import queue as _queue_mod
+        mock_ws_mod.connect.return_value = MagicMock()
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        # Mock queue that reports non-empty but raises Empty on get
+        mock_q = MagicMock(spec=_queue_mod.Queue)
+        empty_calls = [False, True]
+        mock_q.empty.side_effect = lambda: empty_calls.pop(0) if empty_calls else True
+        mock_q.get_nowait.side_effect = _queue_mod.Empty
+        mock_q.put_nowait = MagicMock()
+        mock_q.put = MagicMock()
+        mock_q.maxsize = 100
+        engine._send_queue = mock_q
+        engine.connect()
+        engine.close()
+
+    @patch("whisper_dictation.engine.whisperlivekit.ws_sync")
+    def test_connect_exception_during_thread_start(self, mock_ws_mod):
+        """Exception after WS connect but during thread start calls close() (lines 214-216)."""
+        mock_ws = MagicMock()
+        mock_ws_mod.connect.return_value = mock_ws
+
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+
+        # Make Thread creation fail after WS is connected
+        with patch("whisper_dictation.engine.whisperlivekit.threading.Thread",
+                    side_effect=RuntimeError("thread creation failed")):
+            with pytest.raises(RuntimeError, match="thread creation failed"):
+                engine.connect()
+
+        # close() should have been called, clearing connected
+        assert not engine._connected.is_set()
+
+
+# ---------------------------------------------------------------------------
+# Flush send_eoa=False noop (line 267)
+# ---------------------------------------------------------------------------
+
+
+class TestWaitForCompletion:
+    def test_returns_true_when_set(self):
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        engine._flush_done.set()
+        assert engine.wait_for_completion(timeout=0.01) is True
+
+    def test_returns_false_on_timeout(self):
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        assert engine.wait_for_completion(timeout=0.01) is False
+
+
+class TestFlushSendEoaFalseNoop:
+    def test_flush_send_eoa_false_does_not_queue(self):
+        """flush(send_eoa=False) does nothing to the queue (line 267 — noop path)."""
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        engine._connected.set()
+        engine.flush(send_eoa=False)
+        assert engine._send_queue.empty()
+        assert engine._eoa_sent is False
+
+
+# ---------------------------------------------------------------------------
+# transcribe_batch: queue.Full for END_OF_AUDIO + timeout warning (lines 293-294, 299)
+# ---------------------------------------------------------------------------
+
+
+class TestTranscribeBatchEdgeCases:
+    def test_batch_eoa_queue_full(self):
+        """EOA put fails with queue.Full in batch mode (lines 293-294)."""
+        import queue as queue_mod
+
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+
+        def fake_connect():
+            engine._connected.set()
+
+        original_put = engine._send_queue.put
+
+        def fake_put(data, timeout=None):
+            if data is _END_SENTINEL:
+                raise queue_mod.Full
+            return original_put(data, timeout=timeout)
+
+        with patch.object(engine, "connect", side_effect=fake_connect), \
+             patch.object(engine._send_queue, "put", side_effect=fake_put), \
+             patch.object(engine, "wait_for_completion", return_value=True), \
+             patch.object(engine, "close"):
+            result = engine.transcribe_batch(np.zeros(512, dtype=np.float32))
+
+        # EOA was not sent, so _eoa_sent stays False
+        assert engine._eoa_sent is False
+        # Result is empty string (no collected text, no fallback)
+        assert result == ""
+
+    def test_batch_timeout_warning(self):
+        """Batch transcription timeout triggers warning log (line 299)."""
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+
+        def fake_connect():
+            engine._connected.set()
+
+        with patch.object(engine, "connect", side_effect=fake_connect), \
+             patch.object(engine, "wait_for_completion", return_value=False), \
+             patch.object(engine, "close"), \
+             patch("whisper_dictation.engine.whisperlivekit.log") as mock_log:
+            engine.transcribe_batch(np.zeros(512, dtype=np.float32))
+
+        # Should have logged a timeout warning
+        mock_log.warning.assert_called()
+        args = mock_log.warning.call_args[0]
+        assert "timed out" in args[0]
+
+
+# ---------------------------------------------------------------------------
+# close(): queue full for None sentinel (lines 323-324)
+# ---------------------------------------------------------------------------
+
+
+class TestCloseQueueFull:
+    def test_close_queue_full_for_sentinel(self):
+        """close() handles queue.Full when putting None sentinel (lines 323-324)."""
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        # Fill queue so put_nowait raises Full
+        for _ in range(100):
+            engine._send_queue.put(b"x")
+        engine.close()  # should not raise
+        assert engine._stop_event.is_set()
+
+    def test_close_drain_handles_empty_race(self):
+        """close() drain handles TOCTOU: empty() False but get_nowait() raises Empty."""
+        import queue as _queue_mod
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        mock_q = MagicMock(spec=_queue_mod.Queue)
+        empty_calls = [False, True]
+        mock_q.empty.side_effect = lambda: empty_calls.pop(0) if empty_calls else True
+        mock_q.get_nowait.side_effect = _queue_mod.Empty
+        mock_q.put_nowait = MagicMock()
+        engine._send_queue = mock_q
+        engine.close()
+
+
+# ---------------------------------------------------------------------------
+# _join_thread: finished-but-started thread path (lines 344-345)
+# ---------------------------------------------------------------------------
+
+
+class TestJoinThreadFinished:
+    def test_join_finished_started_thread(self):
+        """Thread that was started (ident set) but is no longer alive (lines 344-345)."""
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        # Create a real thread that has already finished
+        done_event = threading.Event()
+        t = threading.Thread(target=lambda: done_event.set())
+        t.start()
+        done_event.wait()
+        t.join()  # ensure it's done
+
+        # ident is set (was started) but is_alive() is False
+        assert t.ident is not None
+        assert not t.is_alive()
+
+        engine._join_thread(t, "finished")  # should not raise
+
+
+# ---------------------------------------------------------------------------
+# _sender_loop: stop_event primary exit (lines 385-386)
+# ---------------------------------------------------------------------------
+
+
+class TestSenderLoopStopEvent:
+    def test_sender_loop_hits_empty_then_stops(self):
+        """Sender loop gets queue.Empty, continues, then stops on stop_event."""
+        import threading as _threading
+        import time as _time
+
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        engine._ws = MagicMock()
+        # Let loop run — queue is empty, so get() times out (queue.Empty),
+        # then continue back to while check where stop_event is now set.
+        def delayed_stop():
+            _time.sleep(0.15)
+            engine._stop_event.set()
+        t = _threading.Thread(target=delayed_stop, daemon=True)
+        t.start()
+        engine._sender_loop()
+        t.join(timeout=1.0)
+        engine._ws.send.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# _receiver_loop: stop_event primary exit (line 414)
+# ---------------------------------------------------------------------------
+
+
+class TestReceiverLoopStopEvent:
+    def test_receiver_loop_hits_timeout_then_stops(self):
+        """Receiver loop gets TimeoutError, continues, then stops on stop_event."""
+
+        mock_ws = MagicMock()
+        call_count = [0]
+
+        def fake_recv(timeout=None):
+            call_count[0] += 1
+            if call_count[0] >= 2:
+                # Set stop on second call so first TimeoutError hits continue
+                raise RuntimeError("closed")
+            raise TimeoutError
+
+        mock_ws.recv.side_effect = fake_recv
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        engine._ws = mock_ws
+        engine._receiver_loop()
+        assert call_count[0] >= 2  # Hit TimeoutError at least once
+
+
+# ---------------------------------------------------------------------------
+# _handle_message: exception handler (lines 436-437)
+# ---------------------------------------------------------------------------
+
+
+class TestHandleMessageException:
+    def test_handle_message_exception_caught_in_receiver(self, caplog):
+        """Exception in _handle_message is caught and logged (lines 436-437)."""
+        import logging
+        mock_ws = MagicMock()
+        msg_good = json.dumps({"lines": [{"text": "ok"}], "buffer_transcription": ""})
+        mock_ws.recv.side_effect = [msg_good, RuntimeError("closed")]
+
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        engine._ws = mock_ws
+
+        # Patch _handle_message to raise on first call
+        original = engine._handle_message
+        calls = [0]
+
+        def raising_handler(msg):
+            calls[0] += 1
+            if calls[0] == 1:
+                raise ValueError("boom")
+            return original(msg)
+
+        engine._handle_message = raising_handler
+        # Need two messages — first raises, second breaks
+        msg2 = json.dumps({"lines": [{"text": "ok"}], "buffer_transcription": ""})
+        mock_ws.recv.side_effect = [msg_good, msg2, RuntimeError("closed")]
+        with caplog.at_level(logging.WARNING, logger="whisper_dictation.engine.whisperlivekit"):
+            engine._receiver_loop()
+        assert "Error handling WLK message" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# close(): drain queue Empty break path (lines 344-345 in close)
+# ---------------------------------------------------------------------------
+
+
+class TestCloseDrainEmpty:
+    def test_close_drain_empty_queue(self):
+        """close() drain loop handles already-empty queue (lines 344-345 — break on Empty)."""
+        engine = WhisperLiveKitEngine(
+            server_url="http://localhost:8000", language="en",
+        )
+        # Queue is empty — drain at end of close() hits Empty and breaks
+        engine.close()
+        assert engine._send_queue.empty()

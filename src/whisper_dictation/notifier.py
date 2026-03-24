@@ -12,10 +12,12 @@ log = logging.getLogger(__name__)
 
 def notify(title: str, message: str = "") -> None:
     """Show a desktop notification. Best-effort, non-blocking, never raises."""
+    if not title and not message:
+        return
     try:
         if sys.platform == "linux":
             subprocess.Popen(
-                ["notify-send", "-t", "2000", "-a", "Dictation", title, message],
+                ["notify-send", "-t", "2000", "-a", "Dictation", "--", title, message],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
@@ -24,7 +26,7 @@ def notify(title: str, message: str = "") -> None:
             def _applescript_escape(s: str) -> str:
                 s = s.replace("\\", "\\\\").replace('"', '\\"')
                 s = s.replace("\n", "\\n").replace("\r", "\\r")
-                return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", s)
+                return re.sub(r"[\x00-\x1f\x7f]", "", s)
 
             safe_title = _applescript_escape(title)
             safe_message = _applescript_escape(message)

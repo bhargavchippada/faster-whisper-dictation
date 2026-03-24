@@ -94,17 +94,32 @@ def _load_onnx_model() -> None:
 
     cache = Path(user_cache_dir(APP_NAME)) / "silero_vad.onnx"
     if not cache.exists():
-        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         tmp = cache.with_suffix(".tmp")
         log.info("Downloading Silero VAD ONNX model...")
         try:
+            # Stream with size limit to prevent memory exhaustion from
+            # a malicious server at a custom DICTATION_VAD_MODEL_URL.
+            _MAX_MODEL_BYTES = 50 * 1024 * 1024  # 50 MB (real model is ~2 MB)
             with urllib.request.urlopen(_ONNX_MODEL_URL, timeout=60) as resp:
-                tmp.write_bytes(resp.read())
+                chunks: list[bytes] = []
+                total = 0
+                while True:
+                    chunk = resp.read(65536)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > _MAX_MODEL_BYTES:
+                        raise RuntimeError(
+                            f"Model download exceeds {_MAX_MODEL_BYTES} byte limit"
+                        )
+                    chunks.append(chunk)
+                tmp.write_bytes(b"".join(chunks))
             if _VERIFY_HASH:
                 _verify_model_hash(tmp, _ONNX_MODEL_SHA256)
             else:
                 log.debug("SHA-256 verification skipped (DICTATION_VAD_VERIFY_HASH=true to enable)")
-            tmp.rename(cache)
+            tmp.replace(cache)  # atomic on POSIX, works cross-filesystem
         except Exception:
             tmp.unlink(missing_ok=True)
             raise
@@ -310,6 +325,7 @@ class SpeechDetector:
             audio = np.concatenate(self._speech_frames)
             has_enough = self._speech_count >= self.min_speech_chunks
             self._speech_frames.clear()
+            self._ring_buffer.clear()
             self._is_speaking = False
             self._silence_count = 0
             self._speech_count = 0

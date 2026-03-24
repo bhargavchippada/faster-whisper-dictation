@@ -14,6 +14,7 @@ from whisper_dictation.config import (
     HotkeyConfig,
     ServerConfig,
     VADConfig,
+    WebSocketConfig,
     _apply_env_overrides,
     _build_section,
     load_config,
@@ -28,7 +29,7 @@ from whisper_dictation.config import (
 class TestDefaults:
     def test_server_defaults(self):
         cfg = ServerConfig()
-        assert cfg.url == "http://localhost:10300"
+        assert cfg.url == "http://localhost:8000"
         assert cfg.model == "Systran/faster-whisper-large-v3"
         assert cfg.language == "en"
         assert cfg.timeout == 10
@@ -40,7 +41,7 @@ class TestDefaults:
 
     def test_vad_defaults(self):
         cfg = VADConfig()
-        assert cfg.threshold == 0.5
+        assert cfg.threshold == 0.6
         assert cfg.silence_ms == 200
         assert cfg.min_speech_ms == 250
 
@@ -102,7 +103,7 @@ class TestBuildSection:
     def test_partial_override(self):
         section = _build_section({"language": "fr"}, ServerConfig)
         assert section.language == "fr"
-        assert section.url == "http://localhost:10300"  # default preserved
+        assert section.url == "http://localhost:8000"  # default preserved
 
     def test_all_sections(self):
         for cls in (ServerConfig, HotkeyConfig, VADConfig, AudioConfig, EngineConfig):
@@ -232,7 +233,7 @@ class TestLoadConfig:
         with patch.dict("os.environ", {}, clear=True):
             cfg = load_config(toml_path)
         assert cfg.server.model == "tiny"
-        assert cfg.server.url == "http://localhost:10300"  # default
+        assert cfg.server.url == "http://localhost:8000"  # default
         assert cfg.hotkey == HotkeyConfig()  # all defaults
 
     def test_toml_with_unknown_keys(self, tmp_path):
@@ -306,6 +307,27 @@ class TestValidate:
         cfg = Config(hotkey=HotkeyConfig(mode="bad"))
         with pytest.raises(ValueError, match="hotkey.mode"):
             validate(cfg)
+
+    def test_invalid_hotkey_binding(self):
+        cfg = Config(hotkey=HotkeyConfig(binding='alt+v" & do shell script "echo pwned'))
+        with pytest.raises(ValueError, match="hotkey.binding"):
+            validate(cfg)
+
+    def test_empty_hotkey_binding(self):
+        cfg = Config(hotkey=HotkeyConfig(binding=""))
+        with pytest.raises(ValueError, match="hotkey.binding"):
+            validate(cfg)
+
+    def test_valid_hotkey_bindings(self):
+        for binding in ("alt+v", "ctrl+shift+d", "super+a", "V", "meta+z"):
+            cfg = Config(hotkey=HotkeyConfig(binding=binding))
+            validate(cfg)  # should not raise
+
+    def test_invalid_hotkey_binding_unsupported_key(self):
+        for binding in ("F12", "alt+1", "ctrl+space"):
+            cfg = Config(hotkey=HotkeyConfig(binding=binding))
+            with pytest.raises(ValueError, match="hotkey.binding"):
+                validate(cfg)
 
     def test_invalid_engine_type(self):
         cfg = Config(engine=EngineConfig(type="bad"))
@@ -384,3 +406,106 @@ class TestValidate:
         cfg = Config(server=ServerConfig(url="not-a-url-without-scheme"))
         with pytest.raises(ValueError, match="server.url must use http or https"):
             validate(cfg)
+
+    # WebSocket config validation
+
+    def test_ws_reconnect_attempts_negative(self):
+        cfg = Config(websocket=WebSocketConfig(reconnect_attempts=-1))
+        with pytest.raises(ValueError, match="websocket.reconnect_attempts"):
+            validate(cfg)
+
+    def test_ws_reconnect_delay_zero(self):
+        cfg = Config(websocket=WebSocketConfig(reconnect_delay=0.0))
+        with pytest.raises(ValueError, match="websocket.reconnect_delay"):
+            validate(cfg)
+
+    def test_ws_reconnect_delay_too_high(self):
+        cfg = Config(websocket=WebSocketConfig(reconnect_delay=31.0))
+        with pytest.raises(ValueError, match="websocket.reconnect_delay"):
+            validate(cfg)
+
+    # Temperature validation
+
+    def test_temperature_out_of_range(self):
+        cfg = Config(server=ServerConfig(temperature=1.5))
+        with pytest.raises(ValueError, match="server.temperature"):
+            validate(cfg)
+
+    def test_temperature_nan(self):
+        cfg = Config(server=ServerConfig(temperature=float("nan")))
+        with pytest.raises(ValueError, match="server.temperature"):
+            validate(cfg)
+
+    def test_max_speech_s_inf(self):
+        cfg = Config(vad=VADConfig(max_speech_s=float("inf")))
+        with pytest.raises(ValueError, match="vad.max_speech_s"):
+            validate(cfg)
+
+    # Language validation
+
+    def test_language_valid_codes(self):
+        for lang in ("en", "de", "zh-CN", "pt-BR", "auto"):
+            cfg = Config(server=ServerConfig(language=lang))
+            validate(cfg)  # should not raise
+
+    def test_language_invalid_code(self):
+        cfg = Config(server=ServerConfig(language="not a language!"))
+        with pytest.raises(ValueError, match="server.language"):
+            validate(cfg)
+
+    def test_language_empty_passes(self):
+        """Empty language is allowed (server uses its own default)."""
+        cfg = Config(server=ServerConfig(language=""))
+        validate(cfg)  # should not raise
+
+
+# ---------------------------------------------------------------------------
+# _apply_env_overrides — bool coercion (config.py line 136)
+# ---------------------------------------------------------------------------
+
+
+class TestApplyEnvOverridesBoolCoercion:
+    """Cover the bool coercion branch in _merge_section.
+
+    No current config section has a bool field, so we force the branch by
+    using object.__setattr__ on a frozen dataclass to make a field's current
+    value a bool.  When the env override provides a string for that field,
+    ``type(current_val) is bool`` is True and the coercion branch fires.
+    """
+
+    def test_bool_coercion_true(self):
+        """String 'true' coerced to True for a bool-typed field."""
+        cfg = Config()
+        # Make hotkey.mode appear as a bool field (current value = False)
+        object.__setattr__(cfg.hotkey, "mode", False)
+
+        with patch.dict("os.environ", {"DICTATION_MODE": "true"}, clear=True):
+            result = _apply_env_overrides(cfg)
+        assert result.hotkey.mode is True
+
+    def test_bool_coercion_false(self):
+        """String 'no' coerced to False for a bool-typed field."""
+        cfg = Config()
+        object.__setattr__(cfg.hotkey, "mode", True)
+
+        with patch.dict("os.environ", {"DICTATION_MODE": "no"}, clear=True):
+            result = _apply_env_overrides(cfg)
+        assert result.hotkey.mode is False
+
+    def test_bool_coercion_one(self):
+        """String '1' coerced to True for a bool-typed field."""
+        cfg = Config()
+        object.__setattr__(cfg.hotkey, "mode", False)
+
+        with patch.dict("os.environ", {"DICTATION_MODE": "1"}, clear=True):
+            result = _apply_env_overrides(cfg)
+        assert result.hotkey.mode is True
+
+    def test_bool_coercion_yes(self):
+        """String 'yes' coerced to True for a bool-typed field."""
+        cfg = Config()
+        object.__setattr__(cfg.hotkey, "mode", False)
+
+        with patch.dict("os.environ", {"DICTATION_MODE": "YES"}, clear=True):
+            result = _apply_env_overrides(cfg)
+        assert result.hotkey.mode is True

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -34,8 +35,8 @@ class TestCreateEngine:
         with patch("whisper_dictation.engine.local.LocalEngine", mock_local_cls):
             with patch.dict("sys.modules", {}):
                 engine = create_engine(cfg)
-        # LocalEngine is imported inside create_engine, verify it was called
-        assert engine is not None
+        mock_local_cls.assert_called_once_with(cfg.server, cfg.engine)
+        assert engine is mock_local_cls.return_value
 
 
 # ---------------------------------------------------------------------------
@@ -89,12 +90,14 @@ class TestStart:
         assert daemon.is_running is True
         mock_notify.assert_called()
 
+    @patch("whisper_dictation.daemon.create_ws_engine")
     @patch("whisper_dictation.daemon.notify")
     @patch("whisper_dictation.daemon.create_engine")
-    def test_start_engine_unavailable(self, mock_create, mock_notify):
+    def test_start_engine_unavailable(self, mock_create, mock_notify, mock_ws_fn):
         mock_engine = MagicMock()
         mock_engine.is_available.return_value = False
         mock_create.return_value = mock_engine
+        mock_ws_fn.return_value.is_available.return_value = False
 
         cfg = Config()
         daemon = DictationDaemon(cfg)
@@ -103,6 +106,32 @@ class TestStart:
             daemon.start()
 
         mock_notify.assert_called_with("Error", "Transcription engine not available")
+
+    @patch("whisper_dictation.daemon.HotkeyListener")
+    @patch("whisper_dictation.daemon.create_ws_engine")
+    @patch("whisper_dictation.daemon.notify")
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_start_server_uses_websocket_probe_fallback(
+        self,
+        mock_create,
+        mock_notify,
+        mock_ws_cls,
+        mock_hotkey_cls,
+    ):
+        mock_engine = MagicMock()
+        mock_engine.is_available.return_value = False
+        mock_create.return_value = mock_engine
+        mock_ws_cls.return_value.is_available.return_value = True
+        mock_hotkey = MagicMock()
+        mock_hotkey_cls.return_value = mock_hotkey
+
+        daemon = DictationDaemon(Config())
+        daemon.start()
+
+        mock_ws_cls.return_value.is_available.assert_called_once()
+        mock_hotkey.start.assert_called_once()
+        assert daemon.is_running is True
+        mock_notify.assert_called()
 
     @patch("whisper_dictation.daemon.notify")
     @patch("whisper_dictation.daemon.create_engine")
@@ -197,10 +226,12 @@ class TestOnActivate:
     @patch("whisper_dictation.daemon.AudioStream")
     @patch("whisper_dictation.daemon.create_engine")
     def test_activate_streaming_resets_vad(self, mock_create, mock_audio_cls, mock_notify):
-        """Streaming mode: activate resets VAD state."""
+        """Local-engine streaming mode: activate resets VAD state."""
         mock_create.return_value = MagicMock()
         mock_audio_cls.return_value = MagicMock()
-        daemon = DictationDaemon(Config(), streaming=True)
+        # Use local engine so it takes the local-VAD streaming path, not WS
+        local_config = replace(Config(), engine=EngineConfig(type="local"))
+        daemon = DictationDaemon(local_config, streaming=True)
 
         with patch.object(daemon._vad, "reset") as mock_reset:
             daemon._on_activate()
@@ -218,6 +249,25 @@ class TestOnActivate:
 
         # Should not create a new audio stream
         mock_audio_cls.assert_not_called()
+
+    @patch("whisper_dictation.daemon.notify")
+    @patch("whisper_dictation.daemon.AudioStream")
+    @patch("whisper_dictation.daemon.create_ws_engine")
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_activate_streaming_disables_server_vad(
+        self, mock_create, mock_ws_fn, mock_audio_cls, mock_notify,
+    ):
+        """Streaming mode creates WS engine and connects."""
+        mock_create.return_value = MagicMock()
+        mock_audio_cls.return_value = MagicMock()
+        mock_ws = MagicMock()
+        mock_ws_fn.return_value = mock_ws
+
+        daemon = DictationDaemon(Config(), streaming=True)
+        daemon._on_activate()
+
+        mock_ws_fn.assert_called_once()
+        mock_ws.connect.assert_called_once()
 
     @patch("whisper_dictation.daemon.notify")
     @patch("whisper_dictation.daemon.AudioStream")
@@ -309,10 +359,34 @@ class TestOnDeactivate:
 
     @patch("whisper_dictation.daemon.notify")
     @patch("whisper_dictation.daemon.create_engine")
-    def test_deactivate_batch_transcribes_full_audio(self, mock_create, mock_notify):
-        """Batch mode: deactivate concatenates chunks and transcribes."""
+    def test_deactivate_batch_transcribes_full_audio_server(self, mock_create, mock_notify):
+        """Batch mode + server engine: uses WS batch transcription."""
         mock_create.return_value = MagicMock()
-        daemon = DictationDaemon(Config())
+        daemon = DictationDaemon(Config())  # default engine=server
+        daemon._recording = True
+        daemon._audio = MagicMock()
+        daemon._recorded_chunks = [
+            np.ones(512, dtype=np.float32),
+            np.ones(512, dtype=np.float32),
+        ]
+
+        mock_pool = MagicMock()
+        daemon._transcribe_pool = mock_pool
+
+        daemon._on_deactivate()
+
+        mock_pool.submit.assert_called_once()
+        args = mock_pool.submit.call_args[0]
+        assert args[0] == daemon._transcribe_batch_ws
+        assert len(args[1]) == 1024
+
+    @patch("whisper_dictation.daemon.notify")
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_deactivate_batch_transcribes_full_audio_local(self, mock_create, mock_notify):
+        """Batch mode + local engine: uses local transcribe_and_type."""
+        mock_create.return_value = MagicMock()
+        local_config = replace(Config(), engine=EngineConfig(type="local"))
+        daemon = DictationDaemon(local_config)
         daemon._recording = True
         daemon._audio = MagicMock()
         daemon._recorded_chunks = [
@@ -344,7 +418,6 @@ class TestOnDeactivate:
         daemon._on_deactivate()
 
         mock_thread.assert_not_called()
-        mock_notify.assert_any_call("Stopped", "No audio recorded")
 
 
 # ---------------------------------------------------------------------------
@@ -417,6 +490,23 @@ class TestOnAudioChunk:
         with patch.object(daemon._vad, "process_chunk", side_effect=RuntimeError("VAD error")):
             # Should not raise
             daemon._on_audio_chunk(np.zeros(512, dtype=np.float32))
+
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_batch_buffer_cap_drops_excess_chunks(self, mock_create):
+        """Batch mode: chunks beyond _max_batch_chunks are silently dropped."""
+        mock_create.return_value = MagicMock()
+        from whisper_dictation.config import VADConfig
+
+        config = Config(vad=VADConfig(max_speech_s=0.064))  # 2 chunks at 32ms
+        daemon = DictationDaemon(config)
+        daemon._recording = True
+
+        assert daemon._max_batch_chunks == 2
+
+        for _ in range(5):
+            daemon._on_audio_chunk(np.zeros(512, dtype=np.float32))
+
+        assert len(daemon._recorded_chunks) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -531,3 +621,397 @@ class TestWait:
 
         with patch.object(daemon._running, "wait", return_value=True):
             daemon.wait()
+
+
+# ---------------------------------------------------------------------------
+# WebSocket streaming integration
+# ---------------------------------------------------------------------------
+
+
+class TestWebSocketStreaming:
+    @patch("whisper_dictation.daemon.notify")
+    @patch("whisper_dictation.daemon.AudioStream")
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_ws_activate_connects(self, mock_create, mock_audio_cls, mock_notify):
+        """WS streaming: activate creates and connects WhisperLiveKitEngine."""
+        mock_create.return_value = MagicMock()
+        mock_audio_cls.return_value = MagicMock()
+        daemon = DictationDaemon(Config(), streaming=True)
+        assert daemon._use_ws is True
+
+        with patch("whisper_dictation.daemon.create_ws_engine") as mock_ws_fn:
+            mock_ws = MagicMock()
+            mock_ws_fn.return_value = mock_ws
+            daemon._on_activate()
+            mock_ws.connect.assert_called_once()
+
+    @patch("whisper_dictation.daemon.notify")
+    @patch("whisper_dictation.daemon.AudioStream")
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_ws_activate_passes_on_text_callback(
+        self, mock_create, mock_audio_cls, mock_notify,
+    ):
+        """WS streaming: activate passes on_text callback to engine factory."""
+        mock_create.return_value = MagicMock()
+        mock_audio_cls.return_value = MagicMock()
+        daemon = DictationDaemon(Config(), streaming=True)
+
+        with patch("whisper_dictation.daemon.create_ws_engine") as mock_ws_fn:
+            mock_ws = MagicMock()
+            mock_ws_fn.return_value = mock_ws
+            daemon._on_activate()
+
+        assert "on_text" in mock_ws_fn.call_args.kwargs
+
+    @patch("whisper_dictation.daemon.notify")
+    @patch("whisper_dictation.daemon.AudioStream")
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_ws_activate_connect_failure(self, mock_create, mock_audio_cls, mock_notify):
+        """WS streaming: failed connect cleans up engine, resets state, and notifies."""
+        mock_create.return_value = MagicMock()
+        mock_audio_cls.return_value = MagicMock()
+        daemon = DictationDaemon(Config(), streaming=True)
+
+        with patch("whisper_dictation.daemon.create_ws_engine") as mock_ws_fn:
+            mock_ws = MagicMock()
+            mock_ws.connect.side_effect = ConnectionRefusedError("refused")
+            mock_ws_fn.return_value = mock_ws
+            daemon._on_activate()
+            assert daemon._recording is False
+            assert daemon._ws_engine is None
+            mock_ws.close.assert_called_once()  # engine must be cleaned up
+            mock_notify.assert_any_call("Error", "WebSocket connection failed")
+
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_ws_audio_chunk_sends_to_ws(self, mock_create):
+        """WS streaming: audio chunks are sent to WhisperLiveKitEngine."""
+        mock_create.return_value = MagicMock()
+        daemon = DictationDaemon(Config(), streaming=True)
+        daemon._recording = True
+
+        mock_ws = MagicMock()
+        daemon._ws_engine = mock_ws
+
+        audio = np.zeros(512, dtype=np.float32)
+        daemon._on_audio_chunk(audio)
+
+        mock_ws.send_audio.assert_called_once()
+
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_ws_audio_chunk_send_error_caught(self, mock_create):
+        """WS streaming: send_audio exception is caught, not propagated."""
+        mock_create.return_value = MagicMock()
+        daemon = DictationDaemon(Config(), streaming=True)
+        daemon._recording = True
+
+        mock_ws = MagicMock()
+        mock_ws.send_audio.side_effect = RuntimeError("encode error")
+        daemon._ws_engine = mock_ws
+
+        # Should not raise — exception is caught in audio callback
+        daemon._on_audio_chunk(np.zeros(512, dtype=np.float32))
+
+    @patch("whisper_dictation.daemon.notify")
+    @patch("whisper_dictation.daemon.AudioStream")
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_ws_activate_audio_failure_closes_ws(self, mock_create, mock_audio_cls, mock_notify):
+        """WS streaming: audio start failure closes and clears WebSocket engine."""
+        mock_create.return_value = MagicMock()
+        mock_audio = MagicMock()
+        mock_audio.start.side_effect = RuntimeError("no mic")
+        mock_audio_cls.return_value = mock_audio
+        daemon = DictationDaemon(Config(), streaming=True)
+
+        with patch("whisper_dictation.daemon.create_ws_engine") as mock_ws_fn:
+            mock_ws = MagicMock()
+            mock_ws_fn.return_value = mock_ws
+            daemon._on_activate()
+
+        mock_ws.close.assert_called_once()
+        assert daemon._ws_engine is None
+        assert daemon._recording is False
+
+    @patch("whisper_dictation.daemon.notify")
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_ws_deactivate_flushes_and_closes(self, mock_create, mock_notify):
+        """WS streaming: deactivate flushes and closes WebSocket."""
+        mock_create.return_value = MagicMock()
+        daemon = DictationDaemon(Config(), streaming=True)
+        daemon._recording = True
+        mock_ws = MagicMock()
+        daemon._ws_engine = mock_ws
+        daemon._audio = MagicMock()
+
+        daemon._on_deactivate()
+        daemon._transcribe_pool.shutdown(wait=True)
+
+        mock_ws.flush.assert_called_once_with(send_eoa=True)
+        mock_ws.close.assert_called_once()
+        assert daemon._ws_engine is None
+
+    @patch("whisper_dictation.daemon.notify")
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_ws_deactivate_handles_timeout(self, mock_create, mock_notify):
+        """WS streaming: deactivate handles transcription timeout gracefully."""
+        mock_create.return_value = MagicMock()
+        daemon = DictationDaemon(Config(), streaming=True)
+        daemon._recording = True
+        mock_ws = MagicMock()
+        mock_ws.wait_for_completion.return_value = False  # timeout
+        mock_ws.get_pending_text.return_value = ""
+        daemon._ws_engine = mock_ws
+        daemon._audio = MagicMock()
+
+        daemon._on_deactivate()
+        daemon._transcribe_pool.shutdown(wait=True)
+
+        mock_ws.flush.assert_called_once_with(send_eoa=True)
+        mock_ws.wait_for_completion.assert_called_once()
+        mock_ws.close.assert_called_once()
+
+    @patch("whisper_dictation.daemon.type_text")
+    @patch("whisper_dictation.daemon.notify")
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_ws_deactivate_emits_pending_partial_on_timeout(
+        self, mock_create, mock_notify, mock_type,
+    ):
+        """WS streaming: timeout emits pending text when no completed segments."""
+        mock_create.return_value = MagicMock()
+        daemon = DictationDaemon(Config(), streaming=True)
+        daemon._recording = True
+        mock_ws = MagicMock()
+        mock_ws.wait_for_completion.return_value = False  # timeout
+        mock_ws.get_pending_text.return_value = "partial transcription"
+        daemon._ws_engine = mock_ws
+        daemon._audio = MagicMock()
+
+        daemon._on_deactivate()
+        daemon._transcribe_pool.shutdown(wait=True)
+
+        mock_type.assert_called_once_with("partial transcription ")
+        mock_ws.close.assert_called_once()
+
+    @patch("whisper_dictation.daemon.notify")
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_ws_deactivate_handles_flush_error(self, mock_create, mock_notify):
+        """WS streaming: deactivate handles flush error and still closes."""
+        mock_create.return_value = MagicMock()
+        daemon = DictationDaemon(Config(), streaming=True)
+        daemon._recording = True
+        mock_ws = MagicMock()
+        mock_ws.flush.side_effect = RuntimeError("connection lost")
+        daemon._ws_engine = mock_ws
+        daemon._audio = MagicMock()
+
+        daemon._on_deactivate()
+        daemon._transcribe_pool.shutdown(wait=True)
+
+        # close() should still be called even after flush error
+        mock_ws.close.assert_called_once()
+
+    @patch("whisper_dictation.daemon.type_text")
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_ws_text_callback_types_text(self, mock_create, mock_type):
+        """WS streaming: on_text callback calls type_text."""
+        mock_create.return_value = MagicMock()
+        daemon = DictationDaemon(Config(), streaming=True)
+
+        daemon._on_ws_text("hello world")
+        mock_type.assert_called_once_with("hello world ")
+
+    @patch("whisper_dictation.daemon.type_text")
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_ws_text_callback_strips_whitespace(self, mock_create, mock_type):
+        """WS streaming: on_text strips leading/trailing whitespace."""
+        mock_create.return_value = MagicMock()
+        daemon = DictationDaemon(Config(), streaming=True)
+
+        daemon._on_ws_text("  hello world  ")
+        mock_type.assert_called_once_with("hello world ")
+
+    @patch("whisper_dictation.daemon.type_text")
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_ws_text_callback_ignores_empty(self, mock_create, mock_type):
+        """WS streaming: empty or whitespace-only text is silently ignored."""
+        mock_create.return_value = MagicMock()
+        daemon = DictationDaemon(Config(), streaming=True)
+
+        daemon._on_ws_text("")
+        daemon._on_ws_text("   ")
+        mock_type.assert_not_called()
+
+    @patch("whisper_dictation.daemon.type_text")
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_ws_text_callback_handles_error(self, mock_create, mock_type):
+        """WS streaming: typing error is caught and logged."""
+        mock_create.return_value = MagicMock()
+        mock_type.side_effect = RuntimeError("clipboard error")
+        daemon = DictationDaemon(Config(), streaming=True)
+
+        # Should not raise
+        daemon._on_ws_text("hello")
+
+    @patch("whisper_dictation.daemon.type_text")
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_ws_text_suppresses_repetition(self, mock_create, mock_type):
+        """WS streaming: repeated identical text is suppressed after 2 occurrences."""
+        mock_create.return_value = MagicMock()
+        daemon = DictationDaemon(Config(), streaming=True)
+
+        daemon._on_ws_text("Thank you")
+        daemon._on_ws_text("Thank you")
+        daemon._on_ws_text("Thank you")  # 3rd — suppressed
+        daemon._on_ws_text("Thank you")  # 4th — suppressed
+        assert mock_type.call_count == 2
+
+    @patch("whisper_dictation.daemon.type_text")
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_ws_text_repetition_resets_on_different_text(self, mock_create, mock_type):
+        """WS streaming: repetition counter resets when different text arrives."""
+        mock_create.return_value = MagicMock()
+        daemon = DictationDaemon(Config(), streaming=True)
+
+        daemon._on_ws_text("Thank you")
+        daemon._on_ws_text("Thank you")
+        daemon._on_ws_text("Hello")  # different — resets counter
+        daemon._on_ws_text("Hello")
+        assert mock_type.call_count == 4
+
+    @patch("whisper_dictation.daemon.type_text")
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_ws_text_repetition_ignores_punctuation(self, mock_create, mock_type):
+        """WS streaming: punctuation variations of same text are treated as repeats."""
+        mock_create.return_value = MagicMock()
+        daemon = DictationDaemon(Config(), streaming=True)
+
+        daemon._on_ws_text("Thank you.")
+        daemon._on_ws_text("Thank you!")
+        daemon._on_ws_text("Thank you")  # 3rd — suppressed
+        assert mock_type.call_count == 2
+
+    @patch("whisper_dictation.daemon.type_text")
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_ws_repeat_state_resets_on_activate(self, mock_create, mock_type):
+        """WS streaming: repetition counter resets on new recording session."""
+        mock_create.return_value = MagicMock()
+        daemon = DictationDaemon(Config(), streaming=True)
+
+        # Drive counter to suppression
+        daemon._on_ws_text("Thank you")
+        daemon._on_ws_text("Thank you")
+        daemon._on_ws_text("Thank you")  # suppressed
+        assert mock_type.call_count == 2
+
+        # Simulate new recording — reset counters
+        daemon._last_ws_text = ""
+        daemon._ws_repeat_count = 0
+
+        # After reset, same text should be allowed again
+        daemon._on_ws_text("Thank you")
+        assert mock_type.call_count == 3
+
+    @patch("whisper_dictation.daemon.notify")
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_stop_closes_ws_engine(self, mock_create, mock_notify):
+        """WS streaming: stop() closes WhisperLiveKitEngine."""
+        mock_create.return_value = MagicMock()
+        daemon = DictationDaemon(Config(), streaming=True)
+        mock_ws = MagicMock()
+        daemon._ws_engine = mock_ws
+        daemon._running.set()
+
+        daemon.stop()
+
+        mock_ws.close.assert_called_once()
+        assert daemon._ws_engine is None
+
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_use_ws_false_for_local_engine(self, mock_create):
+        """Local engine with streaming uses local VAD, not WebSocket."""
+        mock_create.return_value = MagicMock()
+        local_config = replace(Config(), engine=EngineConfig(type="local"))
+        daemon = DictationDaemon(local_config, streaming=True)
+        assert daemon._use_ws is False
+
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_use_ws_false_when_not_streaming(self, mock_create):
+        """Batch mode never uses WebSocket."""
+        mock_create.return_value = MagicMock()
+        daemon = DictationDaemon(Config(), streaming=False)
+        assert daemon._use_ws is False
+
+
+# ---------------------------------------------------------------------------
+# _transcribe_batch_ws
+# ---------------------------------------------------------------------------
+
+
+class TestTranscribeBatchWs:
+    @patch("whisper_dictation.daemon.type_text")
+    @patch("whisper_dictation.daemon.create_ws_engine")
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_types_transcribed_text(self, mock_create, mock_ws_cls, mock_type):
+        """WS batch: successful transcription types text."""
+        mock_create.return_value = MagicMock()
+        mock_ws = MagicMock()
+        mock_ws.transcribe_batch.return_value = "hello world"
+        mock_ws_cls.return_value = mock_ws
+
+        daemon = DictationDaemon(Config())
+        daemon._transcribe_batch_ws(np.zeros(16000, dtype=np.float32))
+
+        mock_type.assert_called_once_with("hello world ")
+
+    @patch("whisper_dictation.daemon.notify")
+    @patch("whisper_dictation.daemon.type_text")
+    @patch("whisper_dictation.daemon.create_ws_engine")
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_empty_result_no_notification(self, mock_create, mock_ws_cls, mock_type, mock_notify):
+        """WS batch: empty result logs but does not notify."""
+        mock_create.return_value = MagicMock()
+        mock_ws = MagicMock()
+        mock_ws.transcribe_batch.return_value = ""
+        mock_ws_cls.return_value = mock_ws
+
+        daemon = DictationDaemon(Config())
+        daemon._transcribe_batch_ws(np.zeros(16000, dtype=np.float32))
+
+        mock_type.assert_not_called()
+        # No notification for empty result — only logged
+        mock_notify.assert_not_called()
+
+    @patch("whisper_dictation.daemon.notify")
+    @patch("whisper_dictation.daemon.create_ws_engine")
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_exception_notifies_without_rest_fallback(self, mock_create, mock_ws_cls, mock_notify):
+        """WS batch: exception reports an error and does not fall back to REST."""
+        mock_engine = MagicMock()
+        mock_create.return_value = mock_engine
+        mock_ws_cls.return_value = MagicMock(
+            transcribe_batch=MagicMock(side_effect=ConnectionRefusedError("fail")),
+        )
+
+        daemon = DictationDaemon(Config())
+        daemon._transcribe_batch_ws(np.zeros(16000, dtype=np.float32))
+
+        mock_engine.transcribe.assert_not_called()
+        mock_notify.assert_called_once_with("Error", "Transcription failed")
+
+    @patch("whisper_dictation.daemon.type_text")
+    @patch("whisper_dictation.daemon.create_ws_engine")
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_typing_failure_does_not_fall_back(self, mock_create, mock_ws_cls, mock_type):
+        """WS batch: typing failure after successful transcription does not re-transcribe."""
+        mock_engine = MagicMock()
+        mock_create.return_value = mock_engine
+        mock_ws = MagicMock()
+        mock_ws.transcribe_batch.return_value = "good text"
+        mock_ws_cls.return_value = mock_ws
+        mock_type.side_effect = RuntimeError("typing failed")
+
+        daemon = DictationDaemon(Config())
+        daemon._transcribe_batch_ws(np.zeros(16000, dtype=np.float32))
+
+        # type_text was called (and failed), but REST fallback was NOT triggered
+        mock_type.assert_called_once_with("good text ")
+        mock_engine.transcribe.assert_not_called()

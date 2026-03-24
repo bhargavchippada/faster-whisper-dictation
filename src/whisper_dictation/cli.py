@@ -302,20 +302,20 @@ _DEFAULT_CONFIG_TEMPLATE = """\
 # See: https://github.com/bhargavchippada/faster-whisper-dictation
 
 [server]
-url = "http://localhost:10300"        # Whisper server URL
+url = "http://localhost:8000"         # WhisperLiveKit server URL
 model = "Systran/faster-whisper-large-v3"
 language = "en"                       # Language code (e.g. "en", "es", "de")
 timeout = 10                          # Request timeout in seconds
-# prompt = ""                          # Bias transcription (e.g. domain terms)
+# prompt = ""                          # Domain vocabulary or style example (not instructions)
 # temperature = 0.0                    # 0.0 = accurate, higher = creative
 # hotwords = ""                        # Comma-separated words to boost
 
 [hotkey]
-binding = "alt+v"                     # Hotkey combo (e.g. "alt+v", "ctrl+shift+d")
+binding = "alt+v"                     # Modifiers + single letter (e.g. "alt+v", "ctrl+shift+d")
 mode = "toggle"                       # "toggle" (press to start/stop) or "hold" (hold to speak)
 
 [vad]
-threshold = 0.5                       # Speech detection sensitivity (0.0-1.0)
+threshold = 0.6                       # Speech detection sensitivity (0.0-1.0)
 silence_ms = 200                      # Wait after speech stops before transcribing (ms)
 min_speech_ms = 250                   # Ignore utterances shorter than this (ms)
 max_speech_s = 90.0                   # Maximum single utterance length (seconds)
@@ -326,9 +326,13 @@ channels = 1                          # Number of audio channels (1 = mono)
 # device = "fifine Microphone"        # Uncomment to use a specific mic
 
 [engine]
-type = "server"                       # "server" (Docker/remote) or "local" (local)
+type = "server"                       # "server" (WhisperLiveKit/remote) or "local" (local)
 compute_type = "auto"                 # "auto", "float16" (GPU), "int8" (CPU)
 device = "auto"                       # "auto", "cuda", "cpu"
+
+[websocket]
+reconnect_attempts = 3                # Number of reconnection attempts
+reconnect_delay = 1.0                 # Seconds between reconnection attempts
 """
 
 
@@ -340,7 +344,15 @@ def cmd_config(args: argparse.Namespace) -> None:
             print(f"Config already exists: {CONFIG_FILE}", file=sys.stderr)
             print("Use --force to overwrite.", file=sys.stderr)
             sys.exit(1)
-        CONFIG_FILE.write_text(_DEFAULT_CONFIG_TEMPLATE)
+        fd = os.open(
+            str(CONFIG_FILE),
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+        )
+        try:
+            os.write(fd, _DEFAULT_CONFIG_TEMPLATE.encode())
+        finally:
+            os.close(fd)
         print(f"Config written to: {CONFIG_FILE}")
         return
 
@@ -382,6 +394,10 @@ def cmd_config(args: argparse.Namespace) -> None:
     print(f"  type         = {config.engine.type}")
     print(f"  compute_type = {config.engine.compute_type}")
     print(f"  device       = {config.engine.device}")
+    print()
+    print("[websocket]")
+    print(f"  reconnect_attempts = {config.websocket.reconnect_attempts}")
+    print(f"  reconnect_delay    = {config.websocket.reconnect_delay}s")
 
 
 def cmd_devices(args: argparse.Namespace) -> None:
@@ -411,7 +427,23 @@ def cmd_transcribe(args: argparse.Namespace) -> None:
     )
     validate(config)
 
-    from .engine import create_engine
+    from .engine import create_engine, create_ws_engine
+
+    def _transcribe(audio: np.ndarray, sr: int) -> str:
+        """Transcribe via WS batch (server) or REST/local engine."""
+        if config.engine.type == "server":
+            ws_cfg = config.websocket
+            ws = create_ws_engine(
+                config,
+                server_url=config.server.url,
+                language=config.server.language,
+                reconnect_attempts=ws_cfg.reconnect_attempts,
+                reconnect_delay=ws_cfg.reconnect_delay,
+            )
+            # transcribe_batch() calls self.close() in its own finally block,
+            # so no additional close() is needed here.
+            return ws.transcribe_batch(audio, sr)
+        return engine.transcribe(audio, sr)
 
     engine = create_engine(config)
     try:
@@ -431,7 +463,7 @@ def cmd_transcribe(args: argparse.Namespace) -> None:
                 print(f"Cannot read audio file (WAV format required): {e}", file=sys.stderr)
                 sys.exit(1)
 
-            text = engine.transcribe(audio, sr)
+            text = _transcribe(audio, sr)
             if text:
                 print(text)
             else:
@@ -458,7 +490,7 @@ def cmd_transcribe(args: argparse.Namespace) -> None:
             sd.wait()
             print("Transcribing...", file=sys.stderr)
 
-            text = engine.transcribe(audio.flatten(), config.audio.sample_rate)
+            text = _transcribe(audio.flatten(), config.audio.sample_rate)
             if text:
                 print(text)
             else:
@@ -482,7 +514,10 @@ def main() -> None:
     # start
     p_start = sub.add_parser("start", help="Start the dictation daemon")
     p_start.add_argument("--mode", choices=["toggle", "hold"], help="hotkey mode")
-    p_start.add_argument("--hotkey", help="hotkey binding (e.g. 'alt+v', 'ctrl+shift+d')")
+    p_start.add_argument(
+        "--hotkey",
+        help="hotkey binding: modifiers + single letter (e.g. 'alt+v', 'ctrl+shift+d')",
+    )
     p_start.add_argument("--engine", choices=["server", "local"], help="transcription engine")
     p_start.add_argument("--server-url", help="whisper server URL")
     p_start.add_argument(
