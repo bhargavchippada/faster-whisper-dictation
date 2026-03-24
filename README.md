@@ -110,15 +110,18 @@ WhisperLiveKit is a pip-installable Whisper server. No Docker required.
 uv tool install whisperlivekit       # includes GPU support via faster-whisper
 
 # 2. Start the server (Terminal 1)
-wlk serve --model large-v3 --language en --pcm-input
+wlk serve --model large-v3 --language en --pcm-input \
+  --min-chunk-size 1.5 --confidence-validation
 
 # If your system has CUDA 13+ but needs CUDA 12 libs (e.g. from Ollama):
 LD_LIBRARY_PATH=/usr/local/lib/ollama/cuda_v12:$LD_LIBRARY_PATH \
-  wlk serve --model large-v3 --language en --pcm-input
+  wlk serve --model large-v3 --language en --pcm-input \
+  --min-chunk-size 1.5 --confidence-validation
 
 # 3. Install and start dictation (Terminal 2)
 uv tool install faster-whisper-dictation
-faster-whisper-dictation start
+faster-whisper-dictation start              # batch mode (most accurate)
+faster-whisper-dictation start --streaming  # real-time streaming mode
 
 # 4. Press Alt+V to start/stop dictation
 ```
@@ -320,16 +323,14 @@ pip install whisperlivekit
 ### Running the server
 
 ```bash
-# Batch mode (default — highest accuracy)
-wlk serve --model large-v3 --language en --pcm-input
-
-# Streaming mode (real-time text, see Streaming mode section)
+# Recommended (works for both batch and streaming):
 wlk serve --model large-v3 --language en --pcm-input \
   --min-chunk-size 1.5 --confidence-validation
 
 # If CUDA 12 libs are not in default path (e.g. system has CUDA 13):
 LD_LIBRARY_PATH=/usr/local/lib/ollama/cuda_v12:$LD_LIBRARY_PATH \
-  wlk serve --model large-v3 --language en --pcm-input
+  wlk serve --model large-v3 --language en --pcm-input \
+  --min-chunk-size 1.5 --confidence-validation
 
 # Specify host and port
 wlk serve --model large-v3 --language en --pcm-input --host 0.0.0.0 --port 8000
