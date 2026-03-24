@@ -102,8 +102,10 @@ class DictationDaemon:
 
     def _on_ws_text(self, text: str) -> None:
         """Callback from WebSocket engine when transcription text arrives."""
+        if not text or not text.strip():
+            return
         try:
-            type_text(text + " ")
+            type_text(text.strip() + " ")
             log.debug("WS typed: %d chars", len(text))
         except Exception:
             log.error("Typing failed", exc_info=True)
@@ -117,7 +119,6 @@ class DictationDaemon:
                 log.debug("Typed: %d chars", len(text))
             elif not self.streaming:
                 log.info("No speech detected")
-                notify("No speech", "Nothing was transcribed")
         except Exception:
             log.error("Transcription or typing failed", exc_info=True)
 
@@ -142,7 +143,6 @@ class DictationDaemon:
                 log.debug("WS batch typed: %d chars", len(text))
             else:
                 log.info("No speech detected (WS batch)")
-                notify("No speech", "Nothing was transcribed")
         except Exception:
             log.error("Typing failed after WS batch transcription", exc_info=True)
 
@@ -156,7 +156,6 @@ class DictationDaemon:
 
         log.info("Recording started (use_ws=%s, streaming=%s, engine=%s)",
                  self._use_ws, self.streaming, self.config.engine.type)
-        notify("Recording", "Speak now")
 
         ws_engine = None
         if self._use_ws:
@@ -246,14 +245,13 @@ class DictationDaemon:
             full_audio = np.concatenate(chunks)
             duration = len(full_audio) / self.config.audio.sample_rate
             log.info("Transcribing %.1fs of audio...", duration)
-            notify("Transcribing", f"{duration:.0f}s of audio...")
             if self.config.engine.type == "server":
                 # Use WebSocket for batch (shared model, no REST needed)
                 self._transcribe_pool.submit(self._transcribe_batch_ws, full_audio)
             else:
                 self._transcribe_pool.submit(self._transcribe_and_type, full_audio)
         else:
-            notify("Stopped", "No audio recorded")
+            log.info("No audio recorded")
 
     def _check_server_available(self) -> bool:
         """Check if the transcription server is reachable."""

@@ -418,7 +418,6 @@ class TestOnDeactivate:
         daemon._on_deactivate()
 
         mock_thread.assert_not_called()
-        mock_notify.assert_any_call("Stopped", "No audio recorded")
 
 
 # ---------------------------------------------------------------------------
@@ -801,6 +800,27 @@ class TestWebSocketStreaming:
 
     @patch("whisper_dictation.daemon.type_text")
     @patch("whisper_dictation.daemon.create_engine")
+    def test_ws_text_callback_strips_whitespace(self, mock_create, mock_type):
+        """WS streaming: on_text strips leading/trailing whitespace."""
+        mock_create.return_value = MagicMock()
+        daemon = DictationDaemon(Config(), streaming=True)
+
+        daemon._on_ws_text("  hello world  ")
+        mock_type.assert_called_once_with("hello world ")
+
+    @patch("whisper_dictation.daemon.type_text")
+    @patch("whisper_dictation.daemon.create_engine")
+    def test_ws_text_callback_ignores_empty(self, mock_create, mock_type):
+        """WS streaming: empty or whitespace-only text is silently ignored."""
+        mock_create.return_value = MagicMock()
+        daemon = DictationDaemon(Config(), streaming=True)
+
+        daemon._on_ws_text("")
+        daemon._on_ws_text("   ")
+        mock_type.assert_not_called()
+
+    @patch("whisper_dictation.daemon.type_text")
+    @patch("whisper_dictation.daemon.create_engine")
     def test_ws_text_callback_handles_error(self, mock_create, mock_type):
         """WS streaming: typing error is caught and logged."""
         mock_create.return_value = MagicMock()
@@ -866,8 +886,8 @@ class TestTranscribeBatchWs:
     @patch("whisper_dictation.daemon.type_text")
     @patch("whisper_dictation.daemon.create_ws_engine")
     @patch("whisper_dictation.daemon.create_engine")
-    def test_empty_result_notifies(self, mock_create, mock_ws_cls, mock_type, mock_notify):
-        """WS batch: empty result notifies 'No speech'."""
+    def test_empty_result_no_notification(self, mock_create, mock_ws_cls, mock_type, mock_notify):
+        """WS batch: empty result logs but does not notify."""
         mock_create.return_value = MagicMock()
         mock_ws = MagicMock()
         mock_ws.transcribe_batch.return_value = ""
@@ -877,7 +897,8 @@ class TestTranscribeBatchWs:
         daemon._transcribe_batch_ws(np.zeros(16000, dtype=np.float32))
 
         mock_type.assert_not_called()
-        mock_notify.assert_any_call("No speech", "Nothing was transcribed")
+        # No notification for empty result — only logged
+        mock_notify.assert_not_called()
 
     @patch("whisper_dictation.daemon.notify")
     @patch("whisper_dictation.daemon.create_ws_engine")

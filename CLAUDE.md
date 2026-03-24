@@ -125,7 +125,7 @@ uv build --clear --no-cache
 - Use `unittest.mock.patch` for all external subprocess calls and hardware interfaces.
 - Target: 100% test coverage. All new code must include tests.
 - Tests must never hang — mock `wait_for_completion()` in batch tests with `patch.object(engine, 'wait_for_completion', return_value=True)`. See `tests/test_engine_whisperlivekit.py` for established patterns.
-- Current status: 480 tests, 99% line coverage (2 trivial defensive lines), runs in ~2s.
+- Current status: 482 tests, 99% line coverage (2 trivial defensive lines), runs in ~2s.
 
 ## CI
 
@@ -133,7 +133,7 @@ GitHub Actions runs on every push/PR to main:
 - Python 3.10, 3.11, 3.12, 3.13, 3.14 matrix
 - Lint with ruff
 - Tests with coverage gate (minimum 80%)
-- 480 tests, 99% coverage
+- 482 tests, 99% coverage
 
 ## Performance Notes
 
