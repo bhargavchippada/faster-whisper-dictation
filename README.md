@@ -128,6 +128,8 @@ faster-whisper-dictation start --streaming  # real-time streaming mode
 
 > **Note:** The WhisperLiveKit server (`wlk`) and the dictation client (`faster-whisper-dictation`) are installed separately. The server must be running before starting the client. If you see "Server not reachable", make sure `wlk serve` is running in another terminal.
 
+> **After login or USB keyboard reconnect:** The daemon must be restarted — the hotkey listener loses device handles. Run `faster-whisper-dictation stop && faster-whisper-dictation start -b`.
+
 ### Option B: Local engine (no server needed)
 
 ```bash
