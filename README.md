@@ -495,6 +495,7 @@ Without evdev, pynput is used as a fallback. Hold mode with pynput has a 250ms d
 | Problem | Solution |
 |---------|----------|
 | Hotkey not responding | Check `faster-whisper-dictation status`. On Linux, ensure your user is in the `input` group (`sudo usermod -aG input $USER` then re-login) for evdev support. |
+| Hotkey stops working after login/USB reconnect | The evdev listener loses device handles on logout/login or USB keyboard reconnect. Restart the daemon: `faster-whisper-dictation stop && faster-whisper-dictation start -b` |
 | Hold mode releases early | On Linux, install evdev access (see above). Without it, pynput's X11 backend has auto-repeat issues. Tune with `DICTATION_HOLD_DEBOUNCE_MS=300`. |
 | Streaming garbled/slow speech | Increase server `--min-chunk-size` (default 0.1s, try 1.5). See [Streaming mode](#streaming-mode). |
 | "Server not reachable" | Start the WhisperLiveKit server: `wlk serve --model large-v3 --language en --pcm-input`. Or use `--engine local`. |
