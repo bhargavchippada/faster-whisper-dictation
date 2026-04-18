@@ -425,6 +425,28 @@ wlk serve --model large-v3-turbo --language en --pcm-input \
   --min-chunk-size 1.5 --confidence-validation
 ```
 
+### Dictating code (programming vocabulary)
+
+Whisper transcribes programming terms like `git push` as "get push", `useState` as "use state", or `async` as "a sink" because they're under-represented in its training data. Fix this with Whisper's `initial_prompt` — a short text sample Whisper conditions on to bias decoding toward the vocabulary you actually use.
+
+Two things to know, straight from the [official OpenAI Whisper prompting guide](https://developers.openai.com/cookbook/examples/whisper_prompting_guide):
+
+- **Use natural prose, not a keyword list.** Whisper emulates the *style* of the prompt, so sentences that use the terms in context work much better than a comma-separated glossary.
+- **Don't write instructions.** "Transcribe code correctly" gets typed verbatim. Write example sentences; Whisper copies the style.
+
+Pass it on the server side via WhisperLiveKit's `--static-init-prompt` flag (persists across segments). Here's a stack-neutral general-purpose prompt for programmers:
+
+```bash
+LD_LIBRARY_PATH=/usr/local/lib/ollama/cuda_v12:$LD_LIBRARY_PATH \
+  wlk serve --model large-v3 --language en --pcm-input \
+  --min-chunk-size 1.5 --confidence-validation \
+  --static-init-prompt "Earlier I ran git status, git pull, and git push origin main, then opened a pull request and resolved the merge conflicts. I committed the fix, rebased onto main, and cherry-picked a patch onto the release branch. In the code I wrote a Python function, a JavaScript handler, and a small shell script. The service speaks JSON over HTTPS to a REST API, reads from a SQL database, and writes to a queue. I grep the logs, tail the output, curl the endpoint, ssh into the server, and kill the stuck process. Async and await, promises, try and catch, null and undefined, string and integer, boolean and array — all standard. I install dependencies with npm and pip, build with docker, and debug with a stack trace."
+```
+
+This covers the common homophone traps (git verbs, async/await, null/undefined), universal tooling (grep, curl, ssh, kill, npm, pip, docker), and core protocols (JSON, HTTPS, REST, SQL) without locking in a specific framework.
+
+**To extend for your stack:** append one or two sentences in natural prose (not a list) that use *your* terms in context — e.g. `"Our backend runs on FastAPI with PostgreSQL and Redis, and the frontend uses Next.js with Tailwind."` Keep the whole prompt under ~200 tokens; Whisper truncates at 224 and keeps only the last 224.
+
 ## Streaming mode
 
 Streaming mode (`--streaming`) sends audio to the server in real-time and types text as it arrives, instead of waiting for the full utterance. This trades some accuracy for lower latency.
