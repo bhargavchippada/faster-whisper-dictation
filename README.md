@@ -501,8 +501,9 @@ Without evdev, pynput is used as a fallback. Hold mode with pynput has a 250ms d
 | Hold mode releases early | On Linux, install evdev access (see above). Without it, pynput's X11 backend has auto-repeat issues. Tune with `DICTATION_HOLD_DEBOUNCE_MS=300`. |
 | Streaming garbled/slow speech | Increase server `--min-chunk-size` (default 0.1s, try 1.5). See [Streaming mode](#streaming-mode). |
 | "Server not reachable" | Start the WhisperLiveKit server: `wlk serve --model large-v3 --language en --pcm-input`. Or use `--engine local`. |
-| No text appears | Verify your mic: `faster-whisper-dictation transcribe --record 5` |
-| Wrong microphone | List devices with `faster-whisper-dictation devices` and set `audio.device` in config. |
+| No text appears | Verify your mic: `faster-whisper-dictation transcribe --record 5`. If it records silence, the OS is routing audio from the wrong device (see below). |
+| "No speech detected" in logs | The mic is either muted or not the active input. Open your OS sound settings and confirm the correct microphone is selected as the default input device, and that its level is non-zero while you speak. On Linux check `pavucontrol` → Input Devices; on macOS check System Settings → Sound → Input; on Windows check Settings → System → Sound → Input. |
+| Wrong microphone | Pick it at the OS level (default input device) or pin it explicitly: run `faster-whisper-dictation devices` and set `audio.device` in the config (or `DICTATION_AUDIO_DEVICE`) to the exact device name. |
 | Text in wrong window | Text is typed into the focused window when transcription completes. Keep focus on target app. |
 | Whisper hallucinations | Increase VAD threshold: `vad.threshold = 0.7` in config. In streaming mode, repeated phrases (e.g. "Thank you") during silence are auto-suppressed after 2 occurrences. |
 | Wrong words (e.g. "passed" instead of "fast") | Set `server.prompt` or `server.hotwords` in config to bias transcription. |
